@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 500">
-  <defs><linearGradient id="g" x1="0" x2="1"><stop stop-color="#050505"/><stop offset=".5" stop-color="#353535"/><stop offset="1" stop-color="#080808"/></linearGradient></defs>
-  <rect width="1600" height="500" fill="url(#g)"/>
-  <g fill="none" stroke="#fff" opacity=".18"><circle cx="300" cy="220" r="170" stroke-width="2"/><circle cx="1320" cy="270" r="230" stroke-width="3"/><path d="M0 400L420 0M1160 500L1600 60" stroke-width="2"/></g>
-  <text x="800" y="270" fill="#fff" opacity=".9" text-anchor="middle" font-family="Arial,sans-serif" font-size="82" font-weight="700" letter-spacing="18">SPY GAME</text>
-  <text x="800" y="335" fill="#bbb" text-anchor="middle" font-family="Arial,sans-serif" font-size="24" letter-spacing="7">TRUST NO ONE</text>
-</svg>
