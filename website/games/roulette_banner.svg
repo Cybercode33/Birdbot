@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">BirdBot Roulette</title>
+  <desc id="desc">A monochrome roulette wheel with a silver bird silhouette.</desc>
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="45%" r="75%">
+      <stop offset="0" stop-color="#303030"/>
+      <stop offset="0.65" stop-color="#111111"/>
+      <stop offset="1" stop-color="#020202"/>
+    </radialGradient>
+    <linearGradient id="metal" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f5f5f5"/>
+      <stop offset="0.45" stop-color="#777777"/>
+      <stop offset="0.7" stop-color="#eeeeee"/>
+      <stop offset="1" stop-color="#333333"/>
+    </linearGradient>
+    <filter id="shadow" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+  </defs>
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <ellipse cx="1040" cy="700" rx="440" ry="75" fill="#000" opacity=".8" filter="url(#shadow)"/>
+  <g transform="translate(1030 430)">
+    <ellipse rx="475" ry="175" fill="#050505" stroke="#cfcfcf" stroke-width="15"/>
+    <ellipse rx="440" ry="145" fill="url(#metal)" stroke="#222" stroke-width="11"/>
+    <circle r="355" fill="#222" stroke="#d8d8d8" stroke-width="14"/>
+    <g fill="#8d8d8d" stroke="#191919" stroke-width="5">
+      <path d="M0 0L0-325A325 325 0 0 1 141-293Z"/>
+      <path d="M0 0L141-293A325 325 0 0 1 264-190Z"/>
+      <path d="M0 0L264-190A325 325 0 0 1 322-50Z"/>
+      <path d="M0 0L322-50A325 325 0 0 1 280 165Z"/>
+      <path d="M0 0L280 165A325 325 0 0 1 92 312Z"/>
+      <path d="M0 0L92 312A325 325 0 0 1-110 306Z"/>
+      <path d="M0 0L-110 306A325 325 0 0 1-285 155Z"/>
+      <path d="M0 0L-285 155A325 325 0 0 1-322-50Z"/>
+      <path d="M0 0L-322-50A325 325 0 0 1-185-267Z"/>
+      <path d="M0 0L-185-267A325 325 0 0 1 0-325Z"/>
+    </g>
+    <circle r="106" fill="url(#metal)" stroke="#171717" stroke-width="12"/>
+    <circle r="53" fill="#222" stroke="#ddd" stroke-width="8"/>
+  </g>
+  <g transform="translate(240 390) rotate(-10)" fill="url(#metal)" stroke="#111" stroke-width="8" stroke-linejoin="round">
+    <path d="M0 105C90 5 225 18 305 88C270 8 185-35 110-30C145-78 230-88 304-59C245-138 112-133 38-69C-7-31-20 37 0 105Z"/>
+    <path d="M27 80C-49 80-102 49-132 0C-77 14-31 1 20-30C8 6 11 43 27 80Z"/>
+  </g>
+  <text x="100" y="130" fill="#fff" font-family="Arial, sans-serif" font-size="54" font-weight="700" letter-spacing="7">BIRDBOT</text>
+  <text x="104" y="190" fill="#aaa" font-family="Arial, sans-serif" font-size="26" letter-spacing="8">ROULETTE</text>
+</svg>
