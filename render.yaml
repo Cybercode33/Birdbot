@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: birdbot-dashboard
+    runtime: python
+    plan: free
+    # yt-dlp's current YouTube extractor needs a JavaScript runtime for its
+    # EJS challenge solver. Install Deno into Render's persisted project area
+    # during the build and expose it again when the service starts.
+    buildCommand: curl -fsSL https://deno.land/install.sh | sh && pip install -r requirements.txt
+    startCommand: export PATH="$DENO_INSTALL/bin:$PATH" && python run.py
+    envVars:
+      - key: DENO_INSTALL
+        value: /opt/render/project/.deno
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: DISCORD_CLIENT_ID
+        sync: false
+      - key: DISCORD_CLIENT_SECRET
+        sync: false
+      - key: DISCORD_REDIRECT_URI
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
+      - key: SUPPORT_URL
+        sync: false
+      - key: SPOTIFY_CLIENT_ID
+        sync: false
+      - key: SPOTIFY_CLIENT_SECRET
+        sync: false
+      - key: SPOTIFY_REDIRECT_URI
+        sync: false
+      - key: DASHBOARD_PUBLIC_URL
+        sync: false
+      - key: COMMAND_PREFIX
+        value: "!"
