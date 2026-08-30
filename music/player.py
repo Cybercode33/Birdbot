@@ -720,19 +720,21 @@ class MusicPlayer:
         try:
             if expected_command_generation is not None and expected_command_generation != self._command_generation:
                 return
-            # discord.py does not ship an FFmpeg binary.  imageio-ffmpeg
-            # provides a platform-specific binary (including Windows) while
-            # still allowing IMAGEIO_FFMPEG_EXE or a system FFmpeg fallback.
+            # discord.py does not ship an FFmpeg binary.  Render's native
+            # runtimes provide a system FFmpeg, which is preferred there
+            # because it matches the host's libraries.  The bundled
+            # imageio-ffmpeg binary remains a portable fallback for hosts
+            # (especially Windows) where system FFmpeg is unavailable.
             executables: list[str] = []
+            configured = os.getenv("FFMPEG_PATH", "").strip()
+            if configured:
+                executables.append(configured)
+            executables.append("ffmpeg")
             if imageio_ffmpeg is not None:
                 with contextlib.suppress(Exception):
                     bundled = imageio_ffmpeg.get_ffmpeg_exe()
                     if bundled:
                         executables.append(str(bundled))
-            configured = os.getenv("FFMPEG_PATH", "").strip()
-            if configured:
-                executables.append(configured)
-            executables.append("ffmpeg")
             # Preserve order while avoiding duplicate paths (for example when
             # FFMPEG_PATH points at the imageio binary).
             executables = list(dict.fromkeys(executables))
