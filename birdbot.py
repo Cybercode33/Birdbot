@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime
+from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -13,7 +15,7 @@ from settings import COMMAND_PREFIX, GUILD_ID
 from storage import store
 
 
-PRESENCES: list[tuple[discord.ActivityType, str]] = [
+DEFAULT_PRESENCES: list[tuple[discord.ActivityType, str]] = [
     (discord.ActivityType.playing, "with !ping"),
     (discord.ActivityType.watching, "over this server"),
     (discord.ActivityType.listening, "your ideas"),
@@ -25,6 +27,59 @@ PRESENCES: list[tuple[discord.ActivityType, str]] = [
     (discord.ActivityType.playing, "a helpful assistant"),
     (discord.ActivityType.listening, "feedback"),
 ]
+
+PRESENCE_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "bot.config.json"
+_ACTIVITY_TYPES = {
+    "playing": discord.ActivityType.playing,
+    "watching": discord.ActivityType.watching,
+    "listening": discord.ActivityType.listening,
+    "competing": discord.ActivityType.competing,
+}
+_STATUS_TYPES = {
+    "online": discord.Status.online,
+    "idle": discord.Status.idle,
+    "dnd": discord.Status.dnd,
+    "do_not_disturb": discord.Status.dnd,
+    "invisible": discord.Status.invisible,
+    # Discord represents an intentionally hidden bot as ``invisible``;
+    # accepting ``offline`` in the config keeps the file friendly without
+    # sending an unsupported gateway status.
+    "offline": discord.Status.invisible,
+}
+
+
+def load_presence_config() -> tuple[discord.Status, list[tuple[discord.ActivityType, str]], int]:
+    """Load the easy-to-edit bot status/activity configuration file."""
+    status = discord.Status.online
+    activities = list(DEFAULT_PRESENCES)
+    interval_minutes = 2
+    try:
+        raw = json.loads(PRESENCE_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        raw = {}
+    if isinstance(raw, dict):
+        configured_status = str(raw.get("status") or "online").strip().casefold()
+        status = _STATUS_TYPES.get(configured_status, status)
+        configured_activities = raw.get("activities")
+        if isinstance(configured_activities, list):
+            parsed: list[tuple[discord.ActivityType, str]] = []
+            for item in configured_activities[:20]:
+                if not isinstance(item, dict):
+                    continue
+                activity_type = _ACTIVITY_TYPES.get(str(item.get("type") or "playing").strip().casefold())
+                name = str(item.get("name") or "").strip()
+                if activity_type is not None and name:
+                    parsed.append((activity_type, name[:128]))
+            if parsed:
+                activities = parsed
+        try:
+            interval_minutes = max(1, min(1440, int(raw.get("rotate_every_minutes") or 2)))
+        except (TypeError, ValueError):
+            interval_minutes = 2
+    return status, activities, interval_minutes
+
+
+PRESENCE_STATUS, PRESENCES, PRESENCE_INTERVAL_MINUTES = load_presence_config()
 
 
 class EyooBot(commands.Bot):
@@ -39,8 +94,11 @@ class EyooBot(commands.Bot):
             chunk_guilds_at_startup=True,
         )
         self.presence_index = 0
+        self.presences = list(PRESENCES)
+        self.presence_status = PRESENCE_STATUS
         self.started_at: datetime | None = None
         self.members_loaded = False
+        self.rotate_presence.change_interval(minutes=PRESENCE_INTERVAL_MINUTES)
 
     async def setup_hook(self) -> None:
         # Voice clients and stream URLs are process-local; never present a
@@ -144,10 +202,13 @@ class EyooBot(commands.Bot):
 
     @tasks.loop(minutes=2)
     async def rotate_presence(self) -> None:
-        activity_type, name = PRESENCES[self.presence_index]
-        self.presence_index = (self.presence_index + 1) % len(PRESENCES)
+        if not self.presences:
+            await self.change_presence(status=self.presence_status, activity=None)
+            return
+        activity_type, name = self.presences[self.presence_index]
+        self.presence_index = (self.presence_index + 1) % len(self.presences)
         await self.change_presence(
-            status=discord.Status.online,
+            status=self.presence_status,
             activity=discord.Activity(type=activity_type, name=name),
         )
 
@@ -209,6 +270,16 @@ class EyooBot(commands.Bot):
                     if not isinstance(channel, discord.TextChannel) or general is None:
                         raise ValueError("The selected text channel is no longer available.")
                     await general.run_dashboard_server_message(guild, channel, request.get("payload") or {})
+                elif command_name == "bot_profile":
+                    general = self.get_cog("General")
+                    if general is None:
+                        raise ValueError("The Control Panel is not ready yet. Please try again.")
+                    await general.run_dashboard_bot_profile(guild, request.get("payload") or {})
+                elif command_name == "dm_message":
+                    general = self.get_cog("General")
+                    if general is None:
+                        raise ValueError("The Control Panel is not ready yet. Please try again.")
+                    await general.run_dashboard_dm_message(guild, request.get("payload") or {})
                 elif command_name in {"role_create", "role_edit", "role_delete"}:
                     general = self.get_cog("General")
                     if general is None:
@@ -228,6 +299,11 @@ class EyooBot(commands.Bot):
             except discord.Forbidden as error:
                 if getattr(error, "code", None) == 50001:
                     store.complete_command(request["request_id"], "BirdBot cannot access the selected channel. Grant View Channel and Send Messages permissions, then try again.")
+                elif getattr(error, "code", None) == 50278:
+                    store.complete_command(
+                        request["request_id"],
+                        "Discord could not open a DM with that member. Make sure BirdBot is in the selected server and the member allows direct messages from server members.",
+                    )
                 else:
                     store.complete_command(request["request_id"], str(error))
             except asyncio.TimeoutError:
@@ -269,6 +345,3 @@ class EyooBot(commands.Bot):
 def create_bot() -> EyooBot:
     """Return a fresh client; a fresh client is required after stopping one."""
     return EyooBot()
-
-
-#Test
