@@ -36,7 +36,7 @@
       <section class="help-hero">
         <p class="eyebrow"><span></span> BirdBot guide</p>
         <h1>How to use the bot</h1>
-        <p class="tagline">A calm, practical guide to setting up BirdBot from the website and using it in Discord.</p>
+        <p class="tagline">Choose your server, open a feature, save your settings, and use BirdBot in Discord.</p>
       </section>
 
       <section class="help-language" lang="en" aria-labelledby="help-english-title">
@@ -44,7 +44,7 @@
         <div class="help-grid">
           <article class="help-section">
             <h3>1. Sign in and choose a server</h3>
-            <p>Open BirdBot and choose <strong>Open dashboard</strong>. Sign in with Discord, then select a server where you are the owner or have the Administrator permission. The website only shows servers that the bot can see.</p>
+            <p>Open BirdBot and choose <strong>Open dashboard</strong>. Sign in with Discord, select your server, open the feature you want, change its settings, and press its save button. The website then applies the setting for that server in Discord.</p>
             <ul>
               <li>Use <strong>Add the bot</strong> if BirdBot has not been invited yet.</li>
               <li>Press <strong>Activate server</strong> and confirm the server. Activation enables dashboard features for that server; it does not restart the bot.</li>
@@ -87,7 +87,6 @@
             <ul>
               <li>Upload a PNG, JPEG, WebP, or GIF avatar up to 8 MB.</li>
               <li>Leave the nickname blank to reset it, or remove the current server avatar.</li>
-              <li>To change the rotating status and activity text, edit <code>config/bot.config.json</code> and restart BirdBot.</li>
             </ul>
           </article>
 
@@ -136,28 +135,12 @@
 
           <article class="help-section help-warning">
             <h3>10. Music</h3>
-            <p><strong>Warning:</strong> The Music system is not working properly right now and is being fixed. You may still see the player, queue, pause, shuffle, loop, seek, and volume controls, but playback can fail because external providers may block server requests or require cookies.</p>
+            <p><strong>Warning:</strong> The Music system is not working properly right now and is being fixed. You may still see the player, queue, pause, shuffle, loop, seek, and volume controls.</p>
             <ul>
-              <li>Spotify linking and Spotify data require the configured Spotify application and redirect URI.</li>
-              <li>Public YouTube or audio URLs can be pasted into the source box when the provider allows server playback.</li>
-              <li>Make sure BirdBot has Connect and Speak permissions in the voice channel.</li>
+              <li>Open the Music page from the website, join a voice channel, and use the player controls.</li>
+              <li>Paste a song or audio link into the source box, then press play.</li>
+              <li>If playback fails, try again later while the system is being repaired.</li>
             </ul>
-          </article>
-
-          <article class="help-section">
-            <h3>11. Safety and troubleshooting</h3>
-            <p>Keep Discord tokens, OAuth secrets, Spotify secrets, session secrets, and provider cookies private. Store them only in the host’s environment variables or secret files. Never commit <code>.env</code> or a cookies file.</p>
-            <ul>
-              <li>If the dashboard says the bot is offline, check the bot service logs and restart the service.</li>
-              <li>If login fails, verify that the Discord redirect URI exactly matches the deployed HTTPS URL.</li>
-              <li>If a new website change is not visible, wait for the host to redeploy and refresh the page.</li>
-              <li>If Discord rejects an action, check permissions, the bot’s role position, and whether the feature is enabled for the server.</li>
-            </ul>
-          </article>
-
-          <article class="help-section">
-            <h3>Status configuration</h3>
-            <p>The editable status file is <code>config/bot.config.json</code>. Supported statuses are online, idle, dnd, and invisible (offline is treated as invisible).</p>
           </article>
         </div>
       </section>
@@ -167,7 +150,7 @@
         <div class="help-grid">
           <article class="help-section">
             <h3>١. تسجيل الدخول واختيار الخادم</h3>
-            <p>افتح BirdBot واضغط <strong>فتح لوحة التحكم</strong>، ثم سجّل الدخول باستخدام Discord. اختر خادماً تملكه أو لديك فيه صلاحية Administrator. يعرض الموقع الخوادم التي يستطيع البوت الوصول إليها فقط.</p>
+            <p>افتح BirdBot واضغط <strong>فتح لوحة التحكم</strong>، ثم سجّل الدخول باستخدام Discord واختر خادمك. افتح الميزة المطلوبة، عدّل إعداداتها، ثم اضغط زر الحفظ ليطبّق الموقع التغيير في Discord لهذا الخادم.</p>
             <ul>
               <li>استخدم <strong>إضافة البوت</strong> إذا لم تتم دعوة BirdBot إلى الخادم بعد.</li>
               <li>اضغط <strong>تفعيل الخادم</strong> ثم أكّد الاختيار. التفعيل يفتح إعدادات الموقع ولا يعيد تشغيل البوت.</li>
@@ -210,7 +193,6 @@
             <ul>
               <li>ارفع صورة PNG أو JPEG أو WebP أو GIF بحجم يصل إلى ٨ ميجابايت.</li>
               <li>اترك الاسم فارغاً لإعادته إلى الاسم الافتراضي، أو احذف صورة الخادم الحالية.</li>
-              <li>لتغيير الحالة ونص النشاط، عدّل الملف <code>config/bot.config.json</code> ثم أعد تشغيل BirdBot.</li>
             </ul>
           </article>
 
@@ -259,28 +241,12 @@
 
           <article class="help-section help-warning">
             <h3>١٠. الموسيقى</h3>
-            <p><strong>تحذير:</strong> نظام الموسيقى لا يعمل بشكل صحيح حالياً ويجري إصلاحه. قد تظهر أزرار التشغيل والإيقاف المؤقت والعشوائي والتكرار والتقديم والتحكم بالصوت، لكن قد يفشل التشغيل لأن مزوّدي المحتوى الخارجيين قد يمنعون طلبات الخادم أو يطلبون ملفات Cookies.</p>
+            <p><strong>تحذير:</strong> نظام الموسيقى لا يعمل بشكل صحيح حالياً ويجري إصلاحه. قد تظهر أزرار التشغيل والإيقاف المؤقت والعشوائي والتكرار والتقديم والتحكم بالصوت.</p>
             <ul>
-              <li>ربط Spotify وبياناته يحتاجان إلى إعداد تطبيق Spotify وعنوان إعادة التوجيه الصحيح.</li>
-              <li>يمكن لصق روابط YouTube أو روابط الصوت العامة عندما يسمح المزوّد بالتشغيل من الخادم.</li>
-              <li>تأكد من امتلاك BirdBot صلاحيات الاتصال والتحدث في القناة الصوتية.</li>
+              <li>افتح صفحة الموسيقى من الموقع، وانضم إلى قناة صوتية، ثم استخدم أزرار المشغل.</li>
+              <li>الصق رابط الأغنية أو الصوت في مربع المصدر ثم اضغط تشغيل.</li>
+              <li>إذا فشل التشغيل، حاول لاحقاً أثناء إصلاح النظام.</li>
             </ul>
-          </article>
-
-          <article class="help-section">
-            <h3>١١. الأمان وحل المشاكل</h3>
-            <p>حافظ على سرية توكن Discord وأسرار OAuth وSpotify وسر الجلسة وملفات Cookies. خزّنها فقط في متغيرات البيئة أو الملفات السرية لدى المستضيف، ولا ترفع ملف <code>.env</code> أو ملف Cookies إلى GitHub.</p>
-            <ul>
-              <li>إذا ظهر أن البوت غير متصل، راجع سجلات الخدمة وأعد تشغيلها.</li>
-              <li>إذا فشل الدخول، تأكد من تطابق عنوان إعادة توجيه Discord تماماً مع رابط HTTPS المنشور.</li>
-              <li>إذا لم يظهر تعديل الموقع، انتظر اكتمال النشر ثم حدّث الصفحة.</li>
-              <li>إذا رفض Discord الإجراء، راجع الصلاحيات وترتيب دور البوت وتفعيل الميزة للخادم.</li>
-            </ul>
-          </article>
-
-          <article class="help-section">
-            <h3>إعداد الحالة</h3>
-            <p>ملف الحالة القابل للتعديل هو <code>config/bot.config.json</code>. الحالات المدعومة هي online وidle وdnd وinvisible، وتُعامل offline كحالة مخفية.</p>
           </article>
         </div>
       </section>
