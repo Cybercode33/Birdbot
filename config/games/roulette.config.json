@@ -1,0 +1,21 @@
+{
+  "id": "roulette",
+  "name": "Roulette",
+  "theme": "#000000",
+  "bannerPath": "./games/roulette_banner.png",
+  "iconPath": "./games/roulette_icon.svg",
+  "minimumPlayers": 2,
+  "maximumPlayers": 20,
+  "enabled": true,
+  "language": "en",
+  "turnTimerSeconds": 30,
+  "wheelColors": [
+    "#6B7280",
+    "#9CA3AF",
+    "#4B5563",
+    "#374151",
+    "#D1D5DB",
+    "#818CF8",
+    "#A78BFA"
+  ]
+}

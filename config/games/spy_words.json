@@ -1,0 +1,32 @@
+{
+  "places": [
+    { "en": "Airport", "ar": "مطار" },
+    { "en": "Hospital", "ar": "مستشفى" },
+    { "en": "Bank", "ar": "بنك" },
+    { "en": "Space Station", "ar": "محطة فضاء" },
+    { "en": "Restaurant", "ar": "مطعم" },
+    { "en": "School", "ar": "مدرسة" },
+    { "en": "Cinema", "ar": "سينما" },
+    { "en": "Beach", "ar": "شاطئ" },
+    { "en": "Museum", "ar": "متحف" },
+    { "en": "Train Station", "ar": "محطة قطار" },
+    { "en": "Library", "ar": "مكتبة" },
+    { "en": "Zoo", "ar": "حديقة الحيوانات" },
+    { "en": "Fire Station", "ar": "مركز الإطفاء" },
+    { "en": "Mountain Cabin", "ar": "كوخ جبلي" },
+    { "en": "Subway Station", "ar": "محطة مترو" },
+    { "en": "Theater", "ar": "مسرح" }
+  ],
+  "items": [
+    { "en": "phone", "ar": "هاتف" },
+    { "en": "Car", "ar": "سيارة" },
+    { "en": "Camera", "ar": "كاميرا" },
+    { "en": "Clock", "ar": "ساعة" },
+    { "en": "Key", "ar": "مفتاح" },
+    { "en": "Backpack", "ar": "حقيبة ظهر" },
+    { "en": "Umbrella", "ar": "مظلة" },
+    { "en": "Telescope", "ar": "تلسكوب" },
+    { "en": "Lantern", "ar": "مصباح" },
+    { "en": "Microphone", "ar": "ميكروفون" }
+  ]
+}
