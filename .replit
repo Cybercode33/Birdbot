@@ -1,0 +1,5 @@
+entrypoint = "run.py"
+run = "python run.py"
+
+[deployment]
+run = ["sh", "-c", "python run.py"]
