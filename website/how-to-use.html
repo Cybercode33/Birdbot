@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="BirdBot bilingual guide: dashboard, games, tickets, roles, and music." />
+    <title>How to use BirdBot</title>
+    <link rel="stylesheet" href="/assets/styles.css?v=ui64" />
+  </head>
+  <body>
+    <div class="noise" aria-hidden="true"></div>
+    <div class="halo" aria-hidden="true"></div>
+    <div class="ambient-background" aria-hidden="true">
+      <span class="ambient-box ambient-box-one"></span>
+      <span class="ambient-box ambient-box-two"></span>
+      <span class="ambient-box ambient-box-three"></span>
+      <span class="ambient-box ambient-box-four"></span>
+      <span class="ambient-box ambient-box-five"></span>
+      <span class="ambient-box ambient-box-six"></span>
+      <span class="ambient-shape ambient-shape-diamond"></span>
+      <span class="ambient-shape ambient-shape-ring"></span>
+      <span class="ambient-shape ambient-shape-pill"></span>
+    </div>
+
+    <header class="site-header">
+      <div class="header-primary">
+        <a class="brand" href="/">Bird<span>Bot</span></a>
+        <a class="support-button" href="/support">Contact the Support</a>
+      </div>
+      <div class="header-actions">
+        <a class="support-button help-button" href="/">Back</a>
+      </div>
+    </header>
+
+    <main class="help-page">
+      <section class="help-hero">
+        <p class="eyebrow"><span></span> BirdBot guide</p>
+        <h1>How to use the bot</h1>
+        <p class="tagline">A calm, practical guide to setting up BirdBot from the website and using it in Discord.</p>
+      </section>
+
+      <section class="help-language" lang="en" aria-labelledby="help-english-title">
+        <h2 id="help-english-title" class="help-language-heading">English</h2>
+        <div class="help-grid">
+          <article class="help-section">
+            <h3>1. Sign in and choose a server</h3>
+            <p>Open BirdBot and choose <strong>Open dashboard</strong>. Sign in with Discord, then select a server where you are the owner or have the Administrator permission. The website only shows servers that the bot can see.</p>
+            <ul>
+              <li>Use <strong>Add the bot</strong> if BirdBot has not been invited yet.</li>
+              <li>Press <strong>Activate server</strong> and confirm the server. Activation enables dashboard features for that server; it does not restart the bot.</li>
+              <li>After changing a setting, press its save or setup button. Changes are sent to Discord immediately.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>2. Commands</h3>
+            <p>Open the <strong>Commands</strong> tab, choose the text channel, and select the command or action you want. The bot needs permission to view the channel, send messages, embed links, and use components where applicable.</p>
+            <ul>
+              <li>Commands configured here run only in the selected server.</li>
+              <li>If a command fails, check the bot role and the channel permission overwrites.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>3. Server messages</h3>
+            <p>In <strong>Control Panel → Server message</strong>, choose a channel, write the message, and decide whether it is a normal message or an embed. You can write naturally, mention members from the website picker, and select a message to reply to. The website sends it as BirdBot without needing an extra bot command.</p>
+            <ul>
+              <li>Use a public channel that BirdBot can access.</li>
+              <li>Mentions notify the selected Discord member; always use them respectfully.</li>
+              <li>Replies keep the Discord message reference so the conversation appears threaded correctly.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>4. Roles</h3>
+            <p>Open <strong>Control Panel → Roles</strong> to create a role, set its name and color, and view the roles already in the server. Use edit to update a role or delete to remove it.</p>
+            <ul>
+              <li>BirdBot cannot edit roles above its highest role.</li>
+              <li>Discord may reject deleting managed or protected roles.</li>
+              <li>Use a clear color and name so members can understand the role’s purpose.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>5. Bot profile</h3>
+            <p>Open <strong>Control Panel → Bot profile</strong> to set BirdBot’s nickname and avatar for this server only. These settings do not change the global Discord bot account.</p>
+            <ul>
+              <li>Upload a PNG, JPEG, WebP, or GIF avatar up to 8 MB.</li>
+              <li>Leave the nickname blank to reset it, or remove the current server avatar.</li>
+              <li>To change the rotating status and activity text, edit <code>config/bot.config.json</code> and restart BirdBot.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>6. DM’s messages</h3>
+            <p>Open <strong>Control Panel → DM’s messages</strong>, choose a human server member, write a normal message or embed, and optionally insert mentions and attach one image or video.</p>
+            <ul>
+              <li>Attachments are limited to 8 MB and are removed from the dashboard after delivery.</li>
+              <li>The recipient must allow direct messages from server members.</li>
+              <li>Use mentions carefully; only members selected in the website picker are notified.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>7. Games</h3>
+            <p>Open the <strong>Games</strong> tab and enable a game before using it in that server. Each game has a setup area. The selected language and options are stored per server, so Discord games start with the website settings and do not ask players for a language again.</p>
+            <ul>
+              <li>Only an enabled game can create a lobby.</li>
+              <li>Use <strong>Setup</strong> to save the configuration, then try the game in Discord.</li>
+              <li>Games require the bot to be able to send messages and use buttons in the chosen channel.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>8. Roulette</h3>
+            <p>Roulette creates a lobby, lets players join, and spins a real animated wheel when the host starts. The wheel has one equal slice per player and uses the configured seven-color palette. The host can start once the minimum player count is reached.</p>
+            <ul>
+              <li>Players join and leave from the lobby buttons; people outside the game cannot use player-only controls.</li>
+              <li>The lobby closes if it is not started before its timer expires.</li>
+              <li>Each turn has a configurable decision timer. If the current player does not choose, the game applies the timeout rule automatically.</li>
+              <li>Change the language and the seven slice colors in Roulette setup, then save.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>9. Spy Game</h3>
+            <p>Players join a lobby and the host starts it. Citizens receive the same private secret while one player is secretly the Spy. The role message is kept in one private message per player and is edited when it needs to refresh.</p>
+            <ul>
+              <li>In each question turn, only the player asking the question can press <strong>Skip</strong>.</li>
+              <li><strong>Manual End</strong> waits for every player to request a reveal, then starts the vote.</li>
+              <li><strong>Auto End</strong> starts the vote after the configured number of rounds.</li>
+              <li>The vote has a timer. The final message clearly says <strong>The Spy Won</strong> or <strong>The Citizens Won</strong>, names the Spy, and labels the secret as either <strong>Location</strong> or <strong>Object</strong>.</li>
+              <li>Arabic uses the matching Arabic label for the selected secret type.</li>
+            </ul>
+          </article>
+
+          <article class="help-section help-warning">
+            <h3>10. Music</h3>
+            <p><strong>Warning:</strong> The Music system is not working properly right now and is being fixed. You may still see the player, queue, pause, shuffle, loop, seek, and volume controls, but playback can fail because external providers may block server requests or require cookies.</p>
+            <ul>
+              <li>Spotify linking and Spotify data require the configured Spotify application and redirect URI.</li>
+              <li>Public YouTube or audio URLs can be pasted into the source box when the provider allows server playback.</li>
+              <li>Make sure BirdBot has Connect and Speak permissions in the voice channel.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>11. Safety and troubleshooting</h3>
+            <p>Keep Discord tokens, OAuth secrets, Spotify secrets, session secrets, and provider cookies private. Store them only in the host’s environment variables or secret files. Never commit <code>.env</code> or a cookies file.</p>
+            <ul>
+              <li>If the dashboard says the bot is offline, check the bot service logs and restart the service.</li>
+              <li>If login fails, verify that the Discord redirect URI exactly matches the deployed HTTPS URL.</li>
+              <li>If a new website change is not visible, wait for the host to redeploy and refresh the page.</li>
+              <li>If Discord rejects an action, check permissions, the bot’s role position, and whether the feature is enabled for the server.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>Status configuration</h3>
+            <p>The editable status file is <code>config/bot.config.json</code>. Supported statuses are online, idle, dnd, and invisible (offline is treated as invisible).</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="help-language" lang="ar" dir="rtl" aria-labelledby="help-arabic-title">
+        <h2 id="help-arabic-title" class="help-language-heading">العربية</h2>
+        <div class="help-grid">
+          <article class="help-section">
+            <h3>١. تسجيل الدخول واختيار الخادم</h3>
+            <p>افتح BirdBot واضغط <strong>فتح لوحة التحكم</strong>، ثم سجّل الدخول باستخدام Discord. اختر خادماً تملكه أو لديك فيه صلاحية Administrator. يعرض الموقع الخوادم التي يستطيع البوت الوصول إليها فقط.</p>
+            <ul>
+              <li>استخدم <strong>إضافة البوت</strong> إذا لم تتم دعوة BirdBot إلى الخادم بعد.</li>
+              <li>اضغط <strong>تفعيل الخادم</strong> ثم أكّد الاختيار. التفعيل يفتح إعدادات الموقع ولا يعيد تشغيل البوت.</li>
+              <li>بعد تعديل أي إعداد، اضغط زر الحفظ أو الإعداد حتى يتم تطبيقه في Discord.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>٢. الأوامر</h3>
+            <p>افتح تبويب <strong>الأوامر</strong>، اختر القناة النصية، ثم اختر الأمر أو الإجراء. يحتاج البوت إلى صلاحيات رؤية القناة وإرسال الرسائل وإظهار الروابط واستخدام الأزرار عند الحاجة.</p>
+            <ul>
+              <li>تعمل الإعدادات في الخادم الذي اخترته فقط.</li>
+              <li>إذا فشل الأمر، راجع دور البوت وصلاحيات القناة.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>٣. رسائل الخادم</h3>
+            <p>من <strong>لوحة التحكم ← رسالة الخادم</strong> اختر القناة واكتب الرسالة وحدد إن كانت رسالة عادية أو Embed. يمكنك الكتابة بشكل طبيعي، ومنشن الأعضاء باستخدام قائمة الموقع، واختيار رسالة للرد عليها. يرسلها الموقع باسم BirdBot من دون أمر إضافي في البوت.</p>
+            <ul>
+              <li>اختر قناة يستطيع BirdBot الوصول إليها.</li>
+              <li>سيصل المنشن إلى عضو Discord المحدد، فاستخدمه باحترام.</li>
+              <li>يحافظ الرد على مرجع رسالة Discord ليظهر في المحادثة بشكل صحيح.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>٤. الرتب</h3>
+            <p>افتح <strong>لوحة التحكم ← الرتب</strong> لإنشاء رتبة وتحديد اسمها ولونها وعرض الرتب الموجودة في الخادم. يمكنك تعديل الرتبة أو حذفها.</p>
+            <ul>
+              <li>لا يستطيع BirdBot تعديل رتبة أعلى من أعلى رتبة لديه.</li>
+              <li>قد يرفض Discord حذف الرتب المحمية أو المُدارة.</li>
+              <li>اختر اسماً ولوناً واضحين ليسهل فهم وظيفة الرتبة.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>٥. ملف البوت</h3>
+            <p>افتح <strong>لوحة التحكم ← ملف البوت</strong> لتغيير اسم BirdBot وصورته في هذا الخادم فقط. لا تغيّر هذه الإعدادات حساب البوت العام في Discord.</p>
+            <ul>
+              <li>ارفع صورة PNG أو JPEG أو WebP أو GIF بحجم يصل إلى ٨ ميجابايت.</li>
+              <li>اترك الاسم فارغاً لإعادته إلى الاسم الافتراضي، أو احذف صورة الخادم الحالية.</li>
+              <li>لتغيير الحالة ونص النشاط، عدّل الملف <code>config/bot.config.json</code> ثم أعد تشغيل BirdBot.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>٦. رسائل الخاص</h3>
+            <p>افتح <strong>لوحة التحكم ← رسائل الخاص</strong> واختر عضواً بشرياً، ثم اكتب رسالة عادية أو Embed، ويمكنك إضافة منشن وإرفاق صورة أو فيديو.</p>
+            <ul>
+              <li>حجم المرفق ٨ ميجابايت كحد أقصى، ويتم حذفه من لوحة التحكم بعد الإرسال.</li>
+              <li>يجب أن يسمح المستلم بالرسائل الخاصة من أعضاء الخادم.</li>
+              <li>استخدم المنشن بحذر؛ يتم إشعار الأعضاء الذين اخترتهم فقط.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>٧. الألعاب</h3>
+            <p>افتح تبويب <strong>الألعاب</strong> وفعّل اللعبة قبل استخدامها في الخادم. لكل لعبة قسم إعداد خاص بها. تُحفظ اللغة والإعدادات لكل خادم، لذلك تبدأ اللعبة في Discord بالإعدادات التي اخترتها من الموقع ولا تطلب من اللاعبين اختيار اللغة مرة أخرى.</p>
+            <ul>
+              <li>لا يمكن إنشاء ردهة للعبة غير مفعّلة.</li>
+              <li>اضغط <strong>Setup</strong> لحفظ الإعداد ثم جرّب اللعبة في Discord.</li>
+              <li>تحتاج الألعاب إلى صلاحية إرسال الرسائل واستخدام الأزرار في القناة.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>٨. روليت</h3>
+            <p>تنشئ روليت ردهة للّاعبين وتعرض عجلة حقيقية متحركة عند بدء المضيف. لكل لاعب جزء متساوٍ، وتستخدم العجلة لوحة الألوان السبعة التي حددتها. يستطيع المضيف البدء عند الوصول إلى الحد الأدنى.</p>
+            <ul>
+              <li>ينضم اللاعبون ويغادرون من أزرار الردهة، ولا يستطيع من هو خارج اللعبة استخدام أزرار اللاعبين.</li>
+              <li>تُغلق الردهة إذا لم يبدأها المضيف قبل انتهاء المؤقت.</li>
+              <li>لكل دور مؤقت قرار قابل للتعديل. إذا لم يختر اللاعب الحالي، يطبّق النظام قاعدة انتهاء الوقت تلقائياً.</li>
+              <li>غيّر اللغة وألوان الأجزاء السبعة من إعدادات روليت ثم احفظ.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>٩. لعبة الجاسوس</h3>
+            <p>ينضم اللاعبون إلى الردهة ويبدأها المضيف. يحصل المواطنون على السر نفسه في رسائل خاصة، بينما يكون لاعب واحد هو الجاسوس سراً. يحتفظ النظام برسالة خاصة واحدة لكل لاعب ويعدّلها عند الحاجة بدلاً من إنشاء رسائل متكررة.</p>
+            <ul>
+              <li>في دور السؤال، يستطيع اللاعب الذي يطرح السؤال فقط الضغط على <strong>تخطي</strong>.</li>
+              <li><strong>إنهاء يدوي</strong> ينتظر طلب الكشف من جميع اللاعبين ثم يبدأ التصويت.</li>
+              <li><strong>إنهاء تلقائي</strong> يبدأ التصويت بعد عدد الجولات الذي حددته.</li>
+              <li>للتصويت مؤقت. تعرض النتيجة بوضوح «فاز الجاسوس» أو «فاز المواطنون»، مع اسم الجاسوس وتصنيف السر بدقة إلى <strong>الموقع</strong> أو <strong>الغرض</strong>.</li>
+              <li>يستخدم النظام تسمية عربية واحدة تطابق نوع السر المختار.</li>
+            </ul>
+          </article>
+
+          <article class="help-section help-warning">
+            <h3>١٠. الموسيقى</h3>
+            <p><strong>تحذير:</strong> نظام الموسيقى لا يعمل بشكل صحيح حالياً ويجري إصلاحه. قد تظهر أزرار التشغيل والإيقاف المؤقت والعشوائي والتكرار والتقديم والتحكم بالصوت، لكن قد يفشل التشغيل لأن مزوّدي المحتوى الخارجيين قد يمنعون طلبات الخادم أو يطلبون ملفات Cookies.</p>
+            <ul>
+              <li>ربط Spotify وبياناته يحتاجان إلى إعداد تطبيق Spotify وعنوان إعادة التوجيه الصحيح.</li>
+              <li>يمكن لصق روابط YouTube أو روابط الصوت العامة عندما يسمح المزوّد بالتشغيل من الخادم.</li>
+              <li>تأكد من امتلاك BirdBot صلاحيات الاتصال والتحدث في القناة الصوتية.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>١١. الأمان وحل المشاكل</h3>
+            <p>حافظ على سرية توكن Discord وأسرار OAuth وSpotify وسر الجلسة وملفات Cookies. خزّنها فقط في متغيرات البيئة أو الملفات السرية لدى المستضيف، ولا ترفع ملف <code>.env</code> أو ملف Cookies إلى GitHub.</p>
+            <ul>
+              <li>إذا ظهر أن البوت غير متصل، راجع سجلات الخدمة وأعد تشغيلها.</li>
+              <li>إذا فشل الدخول، تأكد من تطابق عنوان إعادة توجيه Discord تماماً مع رابط HTTPS المنشور.</li>
+              <li>إذا لم يظهر تعديل الموقع، انتظر اكتمال النشر ثم حدّث الصفحة.</li>
+              <li>إذا رفض Discord الإجراء، راجع الصلاحيات وترتيب دور البوت وتفعيل الميزة للخادم.</li>
+            </ul>
+          </article>
+
+          <article class="help-section">
+            <h3>إعداد الحالة</h3>
+            <p>ملف الحالة القابل للتعديل هو <code>config/bot.config.json</code>. الحالات المدعومة هي online وidle وdnd وinvisible، وتُعامل offline كحالة مخفية.</p>
+          </article>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
