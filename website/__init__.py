@@ -1,0 +1,1 @@
+"""BirdBot local dashboard package."""
