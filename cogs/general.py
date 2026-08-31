@@ -1181,6 +1181,155 @@ class General(commands.Cog):
         else:
             await channel.send(embed=embed, allowed_mentions=allowed_mentions)
 
+    async def run_dashboard_bot_profile(self, guild: discord.Guild, payload: dict[str, Any]) -> None:
+        """Apply a nickname/avatar to BirdBot's member in one guild only."""
+        bot_member = guild.me
+        if bot_member is None:
+            raise ValueError("BirdBot is not ready in this server.")
+        if not bot_member.guild_permissions.change_nickname:
+            raise ValueError("BirdBot needs Change Nickname permission to update its server profile.")
+        nickname = str(payload.get("nickname") or "").strip()
+        if len(nickname) > 32:
+            raise ValueError("The bot nickname must be 32 characters or fewer.")
+        avatar_action = str(payload.get("avatar_action") or "keep").casefold()
+        if avatar_action not in {"keep", "set", "remove"}:
+            raise ValueError("That avatar action is not available.")
+        kwargs: dict[str, object] = {"nick": nickname or None}
+        avatar_root = (store.path.parent / "bot-profile-avatars").resolve()
+        avatar_path = str(payload.get("avatar_path") or "")
+        avatar_file: Path | None = None
+        if avatar_action == "set":
+            try:
+                candidate = Path(avatar_path).resolve()
+                if candidate.parent != avatar_root or not candidate.is_file():
+                    raise ValueError
+                avatar_bytes = candidate.read_bytes()
+                avatar_file = candidate
+            except (OSError, ValueError) as error:
+                raise ValueError("The uploaded avatar is no longer available. Upload it again.") from error
+            if not avatar_bytes or len(avatar_bytes) > 8 * 1024 * 1024:
+                raise ValueError("The uploaded avatar is invalid or too large.")
+            kwargs["avatar"] = avatar_bytes
+        elif avatar_action == "remove":
+            kwargs["avatar"] = None
+        try:
+            updated = await bot_member.edit(**kwargs, reason="Updated from the BirdBot Control Panel")
+        except TypeError as error:
+            if avatar_file is not None:
+                try:
+                    avatar_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise ValueError("Update discord.py on the bot host to enable server avatars.") from error
+        except (discord.HTTPException, discord.Forbidden):
+            if avatar_file is not None:
+                try:
+                    avatar_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
+        actual_member = updated or bot_member
+        guild_avatar = getattr(actual_member, "guild_avatar", None)
+        avatar_url = str(getattr(guild_avatar, "url", "")) or str(payload.get("previous_avatar_url") or "") or None
+        saved_avatar_path = avatar_path if avatar_action == "set" else None
+        store.save_bot_profile(
+            str(guild.id),
+            nickname,
+            saved_avatar_path,
+            avatar_url,
+            str(payload.get("updated_by") or "") or None,
+        )
+        previous_path = str(payload.get("previous_avatar_path") or "")
+        if previous_path and previous_path != saved_avatar_path:
+            try:
+                previous = Path(previous_path).resolve()
+                if previous.parent == avatar_root and previous.is_file():
+                    previous.unlink()
+            except OSError:
+                pass
+
+    async def run_dashboard_dm_message(self, guild: discord.Guild, payload: dict[str, Any]) -> None:
+        """Send one private normal message/embed with an optional attachment."""
+        member_id = str(payload.get("member_id") or "")
+        if not member_id.isdigit() or not 17 <= len(member_id) <= 20:
+            raise ValueError("Choose a valid server member.")
+        target = await resolve_guild_member(guild, member_id, attempts=1, timeout_seconds=4)
+        if target is None:
+            raise ValueError("That member is no longer in this server.")
+        if target.bot:
+            raise ValueError("Private messages can only be sent to human server members.")
+        raw_mentions = payload.get("mention_user_ids", [])
+        if not isinstance(raw_mentions, list) or len(raw_mentions) > 25:
+            raise ValueError("Choose up to 25 members to mention.")
+        mention_members: list[discord.Member] = []
+        for mention_id in raw_mentions:
+            mention_member = await resolve_guild_member(guild, str(mention_id), attempts=1, timeout_seconds=4)
+            if mention_member is None:
+                raise ValueError("One of the selected mention members is no longer in this server.")
+            mention_members.append(mention_member)
+        allowed_mentions = discord.AllowedMentions(
+            users=mention_members,
+            roles=False,
+            everyone=False,
+            replied_user=False,
+        )
+        media_path = str(payload.get("media_path") or "")
+        media_file: discord.File | None = None
+        media_root = (store.path.parent / "dm-media").resolve()
+        if media_path:
+            try:
+                candidate = Path(media_path).resolve()
+                if candidate.parent != media_root or not candidate.is_file():
+                    raise ValueError
+                if candidate.stat().st_size > 8 * 1024 * 1024:
+                    raise ValueError
+                media_file = discord.File(str(candidate), filename=str(payload.get("media_filename") or candidate.name))
+            except (OSError, ValueError) as error:
+                raise ValueError("The uploaded attachment is no longer available. Upload it again.") from error
+        message_type = str(payload.get("message_type") or "normal").casefold()
+        try:
+            if message_type == "normal":
+                content = str(payload.get("content") or "").strip()
+                if not content:
+                    raise ValueError("Write a private message before sending it.")
+                if media_file is None:
+                    await target.send(content=content, allowed_mentions=allowed_mentions)
+                else:
+                    await target.send(content=content, file=media_file, allowed_mentions=allowed_mentions)
+            elif message_type == "embed":
+                title = str(payload.get("title") or "").strip()
+                description = str(payload.get("description") or "").strip()
+                if not description:
+                    raise ValueError("Write an embed description before sending it.")
+                embed = discord.Embed(
+                    title=title or None,
+                    description=description,
+                    colour=discord.Colour.from_rgb(255, 255, 255),
+                )
+                media_content_type = str(payload.get("media_content_type") or "").casefold()
+                media_filename = str(payload.get("media_filename") or "attachment")
+                if media_file is not None and media_content_type.startswith("image/"):
+                    embed.set_image(url=f"attachment://{media_filename}")
+                if media_file is None:
+                    await target.send(embed=embed, allowed_mentions=allowed_mentions)
+                else:
+                    await target.send(embed=embed, file=media_file, allowed_mentions=allowed_mentions)
+            else:
+                raise ValueError("Choose either a normal message or an embed message.")
+        finally:
+            if media_file is not None:
+                try:
+                    media_file.close()
+                except OSError:
+                    pass
+            if media_path:
+                try:
+                    candidate = Path(media_path).resolve()
+                    if candidate.parent == media_root and candidate.is_file():
+                        candidate.unlink()
+                except OSError:
+                    pass
+
     async def run_dashboard_role_command(
         self,
         guild: discord.Guild,

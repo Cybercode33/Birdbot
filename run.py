@@ -16,6 +16,18 @@ from website.server import app
 RETRY_SECONDS = 30
 
 
+def _report_bot_task_failure(task: asyncio.Task[None]) -> None:
+    """Make background bot startup failures visible without stopping FastAPI."""
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        print(
+            "BirdBot background task stopped: "
+            f"{type(error).__name__}: {error}"
+        )
+
+
 async def run_bot_forever() -> None:
     """Retry transient Discord network failures without stopping the website."""
     while True:
@@ -49,6 +61,7 @@ async def main() -> None:
         uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
     )
     bot_task = asyncio.create_task(run_bot_forever(), name="discord-bot")
+    bot_task.add_done_callback(_report_bot_task_failure)
     try:
         await web_server.serve()
     finally:

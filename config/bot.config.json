@@ -1,0 +1,9 @@
+{
+  "status": "idle",
+  "rotate_every_minutes": 2,
+  "activities": [
+    {"type": "playing", "name": "with !ping"},
+    {"type": "watching", "name": "over this server"},
+    {"type": "listening", "name": "your ideas"}
+  ]
+}

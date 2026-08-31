@@ -10,17 +10,20 @@ BASE_DIR = Path(__file__).parent
 load_dotenv(BASE_DIR / ".env")
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
+COMMAND_PREFIX = os.getenv("COMMAND_PREFIX") or "!"
 GUILD_ID = os.getenv("GUILD_ID")
 DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
 DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
-DISCORD_REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI")
 DISCORD_OWNER_ID = os.getenv("DISCORD_OWNER_ID")
 SESSION_SECRET = os.getenv("SESSION_SECRET")
-DATA_PATH = Path(os.getenv("BIRDBOT_DATA_PATH", BASE_DIR / "data" / "birdbot.sqlite3"))
+DATA_PATH = Path(os.getenv("BIRDBOT_DATA_PATH") or (BASE_DIR / "data" / "birdbot.sqlite3"))
 SUPPORT_URL = os.getenv("SUPPORT_URL")
-# Base URL used in transcript links shared with Discord log messages.
-DASHBOARD_PUBLIC_URL = os.getenv("DASHBOARD_PUBLIC_URL") or "http://127.0.0.1:8000"
+# Render exposes RENDER_EXTERNAL_URL automatically for web services. Use it as
+# the hosted default so a separate .env file is not required on Render; an
+# explicit DASHBOARD_PUBLIC_URL still wins for a custom domain.
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+DASHBOARD_PUBLIC_URL = os.getenv("DASHBOARD_PUBLIC_URL") or RENDER_EXTERNAL_URL or "http://127.0.0.1:8000"
+DISCORD_REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI") or f"{DASHBOARD_PUBLIC_URL.rstrip('/')}/auth/discord/callback"
 
 # Spotify OAuth credentials are kept server-side.  The dashboard never receives
 # either the client secret or a Spotify access/refresh token.

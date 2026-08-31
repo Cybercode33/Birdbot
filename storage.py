@@ -87,6 +87,18 @@ class BirdBotStore:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS bot_profiles (
+                    guild_id TEXT PRIMARY KEY,
+                    nickname TEXT NOT NULL DEFAULT '',
+                    avatar_path TEXT,
+                    avatar_url TEXT,
+                    updated_by TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS guild_activations (
                     guild_id TEXT PRIMARY KEY,
                     activated INTEGER NOT NULL,
@@ -570,6 +582,49 @@ class BirdBotStore:
             for row in rows
         }
         return self._cache_set("bot_guilds", result, ttl=15.0)  # type: ignore[return-value]
+
+    def bot_profile(self, guild_id: str) -> dict[str, object]:
+        """Return the per-guild nickname/avatar configured for BirdBot."""
+        key = f"bot_profile:{guild_id}"
+        cached = self._cache_get(key)
+        if cached is not self._CACHE_MISS:
+            return cached  # type: ignore[return-value]
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT nickname, avatar_path, avatar_url, updated_by, updated_at "
+                "FROM bot_profiles WHERE guild_id = ?",
+                (str(guild_id),),
+            ).fetchone()
+        result: dict[str, object] = {
+            "guild_id": str(guild_id),
+            "nickname": row["nickname"] if row else "",
+            "avatar_path": row["avatar_path"] if row else None,
+            "avatar_url": row["avatar_url"] if row else None,
+            "updated_by": row["updated_by"] if row else None,
+            "updated_at": row["updated_at"] if row else None,
+        }
+        return self._cache_set(key, result, ttl=20.0)  # type: ignore[return-value]
+
+    def save_bot_profile(
+        self,
+        guild_id: str,
+        nickname: str,
+        avatar_path: str | None,
+        avatar_url: str | None,
+        updated_by: str | None = None,
+    ) -> dict[str, object]:
+        """Persist the profile that was successfully applied to one guild."""
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO bot_profiles (guild_id, nickname, avatar_path, avatar_url, updated_by, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET "
+                "nickname = excluded.nickname, avatar_path = excluded.avatar_path, "
+                "avatar_url = excluded.avatar_url, updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+                (str(guild_id), nickname, avatar_path, avatar_url, updated_by, now),
+            )
+        self._invalidate_cache()
+        return self.bot_profile(str(guild_id))
 
     def bot_text_channels(self, guild_id: str) -> list[dict[str, str]]:
         key = f"bot_text_channels:{guild_id}"
