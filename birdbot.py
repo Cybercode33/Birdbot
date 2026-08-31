@@ -269,3 +269,6 @@ class EyooBot(commands.Bot):
 def create_bot() -> EyooBot:
     """Return a fresh client; a fresh client is required after stopping one."""
     return EyooBot()
+
+
+#Test
