@@ -1,0 +1,115 @@
+{
+  "_instructions": "Edit the en/ar text below to change command replies. Supported placeholders: {name}, {member}, {level}, {requested_by}.",
+  "common": {
+    "en": {
+      "disabled": "This command is disabled for this server. Enable it from the website Commands tab.",
+      "not_enabled": "This server has not enabled BirdBot yet.",
+      "bad_argument": "I could not understand that command. Check the member and options, then try again.",
+      "failed": "BirdBot could not complete that command. Please try again.",
+      "slash_option": "I could not understand that command option.",
+      "cooldown": "Please wait before using that command again.",
+      "permission": "You do not have permission to use that command."
+    },
+    "ar": {
+      "disabled": "هذا الأمر معطّل لهذا الخادم. فعّله من تبويب الأوامر في الموقع.",
+      "not_enabled": "لم يفعّل هذا الخادم BirdBot بعد.",
+      "bad_argument": "لم أفهم هذا الأمر. تحقق من العضو والخيارات ثم حاول مجدداً.",
+      "failed": "تعذر على BirdBot تنفيذ هذا الأمر. حاول مجدداً.",
+      "slash_option": "لم أفهم خيار هذا الأمر.",
+      "cooldown": "يرجى الانتظار قبل استخدام هذا الأمر مرة أخرى.",
+      "permission": "ليس لديك صلاحية استخدام هذا الأمر."
+    }
+  },
+  "ping": {
+    "en": {
+      "checking": "Checking connection...",
+      "title": "Connection check",
+      "description": "BirdBot is online and responding.",
+      "response": "Response",
+      "gateway": "Gateway",
+      "footer": "Requested from dashboard by {requested_by}"
+    },
+    "ar": {
+      "checking": "جارٍ التحقق من الاتصال...",
+      "title": "فحص الاتصال",
+      "description": "BirdBot متصل ويستجيب.",
+      "response": "الاستجابة",
+      "gateway": "البوابة",
+      "footer": "طُلب من لوحة التحكم بواسطة {requested_by}"
+    }
+  },
+  "server": {
+    "en": {
+      "title": "{name} server info",
+      "server_id": "Server ID",
+      "owner": "Owner",
+      "members": "Members",
+      "created": "Created",
+      "boost_level": "Boost level",
+      "boost_value": "Level {level}",
+      "unavailable": "Unavailable"
+    },
+    "ar": {
+      "title": "معلومات خادم {name}",
+      "server_id": "معرّف الخادم",
+      "owner": "المالك",
+      "members": "الأعضاء",
+      "created": "تاريخ الإنشاء",
+      "boost_level": "مستوى التعزيز",
+      "boost_value": "المستوى {level}",
+      "unavailable": "غير متاح"
+    }
+  },
+  "profile": {
+    "en": {
+      "title": "{name} profile",
+      "user_id": "User ID",
+      "account_created": "Account created",
+      "joined_server": "Joined server",
+      "roles": "Roles",
+      "no_roles": "No roles",
+      "unavailable": "Unavailable"
+    },
+    "ar": {
+      "title": "ملف {name}",
+      "user_id": "معرّف المستخدم",
+      "account_created": "تاريخ إنشاء الحساب",
+      "joined_server": "انضم إلى الخادم",
+      "roles": "الأدوار",
+      "no_roles": "لا توجد أدوار",
+      "unavailable": "غير متاح"
+    }
+  },
+  "kick": {
+    "en": {
+      "success": "{member} has been Kicked from the server",
+      "permission": "You need Kick Members permission.",
+      "dashboard_permission": "BirdBot needs the Kick Members permission.",
+      "missing_member": "Choose a member first."
+    },
+    "ar": {
+      "success": "تم طرد {member} من السيرفر",
+      "permission": "تحتاج إلى صلاحية طرد الأعضاء.",
+      "dashboard_permission": "يحتاج BirdBot إلى صلاحية طرد الأعضاء.",
+      "missing_member": "اختر عضواً أولاً."
+    }
+  },
+  "ban": {
+    "en": {
+      "success": "{member} has been Banned from the server",
+      "permission": "You need Ban Members permission.",
+      "dashboard_permission": "BirdBot needs the Ban Members permission.",
+      "missing_member": "Choose a member first."
+    },
+    "ar": {
+      "success": "تم حظر {member} من السيرفر",
+      "permission": "تحتاج إلى صلاحية حظر الأعضاء.",
+      "dashboard_permission": "يحتاج BirdBot إلى صلاحية حظر الأعضاء.",
+      "missing_member": "اختر عضواً أولاً."
+    }
+  },
+  "unban": {
+    "en": {"success": "{member} was unbanned."},
+    "ar": {"success": "تم إلغاء حظر {member}."}
+  }
+}

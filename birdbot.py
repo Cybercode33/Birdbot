@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from datetime import datetime
 from pathlib import Path
@@ -11,8 +12,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from command_messages import command_message
 from settings import COMMAND_PREFIX, GUILD_ID
-from storage import store
+from storage import DASHBOARD_COMMAND_NAMES, store
 
 
 DEFAULT_PRESENCES: list[tuple[discord.ActivityType, str]] = [
@@ -88,7 +90,7 @@ class EyooBot(commands.Bot):
         intents.message_content = True
         intents.members = True
         super().__init__(
-            command_prefix=COMMAND_PREFIX,
+            command_prefix=self.get_dynamic_prefix,
             intents=intents,
             help_command=None,
             chunk_guilds_at_startup=True,
@@ -99,6 +101,42 @@ class EyooBot(commands.Bot):
         self.started_at: datetime | None = None
         self.members_loaded = False
         self.rotate_presence.change_interval(minutes=PRESENCE_INTERVAL_MINUTES)
+
+    @staticmethod
+    def get_dynamic_prefix(_: commands.Bot, message: discord.Message) -> str:
+        """Return the prefix configured for the message's server.
+
+        A non-printing sentinel is used while prefix commands are disabled so
+        Discord.py still receives a valid prefix callable but no user message
+        can accidentally invoke a command.
+        """
+        if not message.guild:
+            return COMMAND_PREFIX
+        settings = store.command_settings(str(message.guild.id))
+        if not settings.get("prefix_enabled", True):
+            return "\x00"
+        return str(settings.get("prefix") or COMMAND_PREFIX)
+
+    async def on_message(self, message: discord.Message) -> None:
+        """Dispatch configured per-server shortcuts through their command."""
+        if message.author.bot or not message.guild:
+            await self.process_commands(message)
+            return
+        settings = store.command_settings(str(message.guild.id))
+        prefix = str(settings.get("prefix") or COMMAND_PREFIX)
+        if settings.get("prefix_enabled", True) and message.content.startswith(prefix):
+            remainder = message.content[len(prefix):]
+            shortcut, separator, arguments = remainder.partition(" ")
+            config = store.command_for_shortcut(str(message.guild.id), shortcut)
+            if config and config.get("enabled"):
+                command_name = str(config.get("command_name") or "")
+                command = self.get_command(command_name)
+                if command:
+                    proxy = copy.copy(message)
+                    proxy.content = f"{prefix}{command_name}{(' ' + arguments) if separator else ''}"
+                    await self.process_commands(proxy)
+                    return
+        await self.process_commands(message)
 
     async def setup_hook(self) -> None:
         # Voice clients and stream URLs are process-local; never present a
@@ -131,7 +169,7 @@ class EyooBot(commands.Bot):
         if self.started_at is None:
             self.started_at = discord.utils.utcnow()
         print(f"Logged in as {self.user} (ID: {self.user.id})")
-        print(f"Prefix commands are ready. Prefix: {COMMAND_PREFIX}")
+        print(f"Prefix commands are ready. Default prefix: {COMMAND_PREFIX} (server settings may override it)")
         store.sync_bot_guilds(self.guilds)
         if not self.members_loaded:
             await self.load_all_members()
@@ -176,25 +214,32 @@ class EyooBot(commands.Bot):
     async def on_command_error(self, ctx: commands.Context[commands.Bot], error: commands.CommandError) -> None:
         if isinstance(error, commands.CommandNotFound):
             return
+        command_name = str(ctx.command.qualified_name if ctx.command else "").split(" ", 1)[0]
+        arabic = bool(ctx.guild and store.command_config(str(ctx.guild.id), command_name).get("language") == "ar") if command_name else False
         if isinstance(error, commands.CheckFailure):
-            await ctx.send("This server has not enabled BirdBot yet.")
+            if ctx.guild and command_name in DASHBOARD_COMMAND_NAMES and not store.command_config(str(ctx.guild.id), command_name).get("enabled", True):
+                await ctx.send(command_message("common", "ar" if arabic else "en", "disabled"))
+                return
+            await ctx.send(command_message("common", "ar" if arabic else "en", "not_enabled"))
             return
         if isinstance(error, commands.BadArgument):
-            await ctx.send("I could not understand that command. Check the member and options, then try again.")
+            await ctx.send(command_message("common", "ar" if arabic else "en", "bad_argument"))
             return
         print(f"Prefix command error: {error}")
-        await ctx.send("BirdBot could not complete that command. Please try again.")
+        await ctx.send(command_message("common", "ar" if arabic else "en", "failed"))
 
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+        command_name = str(getattr(interaction.command, "name", ""))
+        arabic = bool(interaction.guild and store.command_config(str(interaction.guild.id), command_name).get("language") == "ar") if command_name else False
         if isinstance(error, app_commands.CommandOnCooldown):
-            message = "Please wait before using that command again."
+            message = command_message("common", "ar" if arabic else "en", "cooldown")
         elif isinstance(error, app_commands.TransformerError):
-            message = "I could not understand that command option."
+            message = command_message("common", "ar" if arabic else "en", "slash_option")
         elif isinstance(error, app_commands.MissingPermissions):
-            message = "You do not have permission to use that command."
+            message = command_message("common", "ar" if arabic else "en", "permission")
         else:
             print(f"Slash command error: {error}")
-            message = "BirdBot could not complete that command. Please try again."
+            message = command_message("common", "ar" if arabic else "en", "failed")
         if interaction.response.is_done():
             await interaction.followup.send(message, ephemeral=True)
         else:

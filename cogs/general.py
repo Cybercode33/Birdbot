@@ -15,6 +15,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from command_messages import command_message
 from discord_members import resolve_guild_member
 from settings import DASHBOARD_PUBLIC_URL
 from storage import UNCLAIMED_TICKET_TIMEOUT_SECONDS, store
@@ -51,13 +52,14 @@ def format_uptime(duration: timedelta) -> str:
     return " ".join(value for value in (f"{days}d" if days else "", f"{hours}h" if hours or days else "", f"{minutes}m", f"{seconds}s") if value)
 
 
-def server_embed(guild: discord.Guild) -> discord.Embed:
-    embed = discord.Embed(title=f"{guild.name} server info", colour=discord.Colour.from_rgb(255, 255, 255))
-    embed.add_field(name="Server ID", value=str(guild.id), inline=True)
-    embed.add_field(name="Owner", value=guild.owner.mention if guild.owner else "Unavailable", inline=True)
-    embed.add_field(name="Members", value=str(guild.member_count or 0), inline=True)
-    embed.add_field(name="Created", value=discord.utils.format_dt(guild.created_at, "D"), inline=True)
-    embed.add_field(name="Boost level", value=f"Level {int(guild.premium_tier)}", inline=True)
+def server_embed(guild: discord.Guild, language: str = "en") -> discord.Embed:
+    embed = discord.Embed(title=command_message("server", language, "title", name=guild.name), colour=discord.Colour.from_rgb(255, 255, 255))
+    unavailable = command_message("server", language, "unavailable")
+    embed.add_field(name=command_message("server", language, "server_id"), value=str(guild.id), inline=True)
+    embed.add_field(name=command_message("server", language, "owner"), value=guild.owner.mention if guild.owner else unavailable, inline=True)
+    embed.add_field(name=command_message("server", language, "members"), value=str(guild.member_count or 0), inline=True)
+    embed.add_field(name=command_message("server", language, "created"), value=discord.utils.format_dt(guild.created_at, "D"), inline=True)
+    embed.add_field(name=command_message("server", language, "boost_level"), value=command_message("server", language, "boost_value", level=int(guild.premium_tier)), inline=True)
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
     if guild.banner:
@@ -65,13 +67,14 @@ def server_embed(guild: discord.Guild) -> discord.Embed:
     return embed
 
 
-def profile_embed(member: discord.Member) -> discord.Embed:
+def profile_embed(member: discord.Member, language: str = "en") -> discord.Embed:
     roles = [role.mention for role in member.roles[1:]]
-    embed = discord.Embed(title=f"{member.display_name} profile", colour=discord.Colour.from_rgb(255, 255, 255))
-    embed.add_field(name="User ID", value=str(member.id), inline=True)
-    embed.add_field(name="Account created", value=discord.utils.format_dt(member.created_at, "D"), inline=True)
-    embed.add_field(name="Joined server", value=discord.utils.format_dt(member.joined_at, "D") if member.joined_at else "Unavailable", inline=True)
-    embed.add_field(name="Roles", value=" ".join(roles) if roles else "No roles", inline=False)
+    unavailable = command_message("profile", language, "unavailable")
+    embed = discord.Embed(title=command_message("profile", language, "title", name=member.display_name), colour=discord.Colour.from_rgb(255, 255, 255))
+    embed.add_field(name=command_message("profile", language, "user_id"), value=str(member.id), inline=True)
+    embed.add_field(name=command_message("profile", language, "account_created"), value=discord.utils.format_dt(member.created_at, "D"), inline=True)
+    embed.add_field(name=command_message("profile", language, "joined_server"), value=discord.utils.format_dt(member.joined_at, "D") if member.joined_at else unavailable, inline=True)
+    embed.add_field(name=command_message("profile", language, "roles"), value=" ".join(roles) if roles else command_message("profile", language, "no_roles"), inline=False)
     embed.set_thumbnail(url=member.display_avatar.url)
     return embed
 
@@ -1048,11 +1051,22 @@ class General(commands.Cog):
         )
 
     async def cog_check(self, ctx: commands.Context[commands.Bot]) -> bool:
-        return bool(ctx.guild and store.is_guild_activated(ctx.guild.id))
+        if not ctx.guild or not store.is_guild_activated(ctx.guild.id):
+            return False
+        command_name = str(ctx.command.qualified_name if ctx.command else "").split(" ", 1)[0]
+        if command_name in {"ping", "server", "profile", "kick", "ban"}:
+            return bool(store.command_config(str(ctx.guild.id), command_name).get("enabled", True))
+        return True
 
     async def active_interaction(self, interaction: discord.Interaction) -> bool:
         if not interaction.guild or not store.is_guild_activated(interaction.guild.id):
             await interaction.response.send_message("This server has not enabled BirdBot yet.", ephemeral=True)
+            return False
+        command = interaction.command
+        command_name = str(getattr(command, "name", ""))
+        if command_name in {"ping", "server", "profile", "kick", "ban"} and not store.command_config(str(interaction.guild.id), command_name).get("enabled", True):
+            language = str(store.command_config(str(interaction.guild.id), command_name).get("language") or "en")
+            await interaction.response.send_message(command_message("common", language, "disabled"), ephemeral=True)
             return False
         return True
 
@@ -1069,13 +1083,17 @@ class General(commands.Cog):
             return "BirdBot's role must be above that member's highest role."
         return None
 
-    async def send_dashboard_ping(self, channel: discord.TextChannel, requested_by: str) -> None:
+    async def send_dashboard_ping(self, channel: discord.TextChannel, requested_by: str, language: str = "en") -> None:
         started = time.perf_counter()
-        message = await channel.send("Checking connection...")
-        embed = discord.Embed(title="Connection check", description="BirdBot is online and responding.", colour=discord.Colour.from_rgb(255, 255, 255))
-        embed.add_field(name="Response", value=f"{round((time.perf_counter() - started) * 1000)}ms", inline=True)
-        embed.add_field(name="Gateway", value=f"{round(self.bot.latency * 1000)}ms", inline=True)
-        embed.set_footer(text=f"Requested from dashboard by {requested_by}")
+        message = await channel.send(command_message("ping", language, "checking"))
+        embed = discord.Embed(
+            title=command_message("ping", language, "title"),
+            description=command_message("ping", language, "description"),
+            colour=discord.Colour.from_rgb(255, 255, 255),
+        )
+        embed.add_field(name=command_message("ping", language, "response"), value=f"{round((time.perf_counter() - started) * 1000)}ms", inline=True)
+        embed.add_field(name=command_message("ping", language, "gateway"), value=f"{round(self.bot.latency * 1000)}ms", inline=True)
+        embed.set_footer(text=command_message("ping", language, "footer", requested_by=requested_by))
         await message.edit(content=None, embed=embed)
 
     async def refresh_bans(self, guild: discord.Guild) -> None:
@@ -1389,6 +1407,8 @@ class General(commands.Cog):
             print(f"Role snapshot refresh failed for {guild.id}: {error}")
 
     async def run_dashboard_command(self, guild: discord.Guild, channel: discord.TextChannel, name: str, requested_by: str, payload: dict[str, Any]) -> None:
+        if name in {"ping", "server", "profile", "kick", "ban"} and not store.command_config(str(guild.id), name).get("enabled", True):
+            raise ValueError("That command is disabled for this server. Enable it from the website Commands tab first.")
         bot_member = guild.me
         if not bot_member:
             raise ValueError("BirdBot is not ready in this server.")
@@ -1397,11 +1417,12 @@ class General(commands.Cog):
             raise ValueError("BirdBot cannot access that channel. Grant it View Channel and Send Messages permissions.")
         if name in {"server", "profile", "ticket_post"} and not channel_permissions.embed_links:
             raise ValueError("BirdBot needs Embed Links permission in that channel to send this panel.")
+        language = str(store.command_config(str(guild.id), name).get("language") or "en")
         if name == "ping":
-            await self.send_dashboard_ping(channel, requested_by)
+            await self.send_dashboard_ping(channel, requested_by, language)
             return
         if name == "server":
-            await channel.send(embed=server_embed(guild))
+            await channel.send(embed=server_embed(guild, language))
             return
         if name == "ticket_post":
             raw_options = payload.get("options")
@@ -1498,13 +1519,13 @@ class General(commands.Cog):
             member = await resolve_guild_member(guild, str(payload.get("member_id") or ""))
             if not member:
                 raise ValueError("That member could not be loaded from Discord. Search again and retry in a moment.")
-            await channel.send(embed=profile_embed(member))
+            await channel.send(embed=profile_embed(member, language))
             return
         if name == "unban":
             if not guild.me or not guild.me.guild_permissions.ban_members: raise ValueError("BirdBot needs the Ban Members permission.")
             user = await self.bot.fetch_user(int(str(payload["member_id"])))
             await guild.unban(user, reason=f"Dashboard action by {requested_by}")
-            await channel.send(f"{user.mention} was unbanned.")
+            await channel.send(command_message("unban", language, "success", member=user.mention))
             await self.refresh_bans(guild)
             return
         member = await resolve_guild_member(guild, str(payload.get("member_id") or ""))
@@ -1516,12 +1537,12 @@ class General(commands.Cog):
         if name == "kick":
             if not guild.me or not guild.me.guild_permissions.kick_members: raise ValueError("BirdBot needs the Kick Members permission.")
             await member.kick(reason=reason)
-            await channel.send(f"{member.mention} has been Kicked from the server")
+            await channel.send(command_message("kick", language, "success", member=member.mention))
             return
         if name == "ban":
             if not guild.me or not guild.me.guild_permissions.ban_members: raise ValueError("BirdBot needs the Ban Members permission.")
             await member.ban(reason=reason, delete_message_seconds=int(payload.get("delete_message_seconds", 0)))
-            await channel.send(f"{member.mention} has been Banned from the server")
+            await channel.send(command_message("ban", language, "success", member=member.mention))
             await self.refresh_bans(guild)
             return
         raise ValueError("That dashboard command is not available.")
@@ -1538,7 +1559,8 @@ class General(commands.Cog):
 
     @commands.group(name="ticket", invoke_without_command=True)
     async def ticket_prefix(self, ctx: commands.Context[commands.Bot]) -> None:
-        await ctx.send("Use `!ticket add @member`, `!ticket remove @member`, or the ticket buttons inside a ticket channel.")
+        prefix = str(store.command_settings(str(ctx.guild.id)).get("prefix") or "!") if ctx.guild else "!"
+        await ctx.send(f"Use `{prefix}ticket add @member`, `{prefix}ticket remove @member`, or the ticket buttons inside a ticket channel.")
 
     @ticket_prefix.command(name="add")
     async def ticket_add_prefix(self, ctx: commands.Context[commands.Bot], member: discord.Member) -> None:
@@ -1604,15 +1626,18 @@ class General(commands.Cog):
 
     @commands.command(name="ping", aliases=("p",))
     async def ping(self, ctx: commands.Context[commands.Bot]) -> None:
-        await self.send_dashboard_ping(ctx.channel, ctx.author.display_name)  # type: ignore[arg-type]
+        language = str(store.command_config(str(ctx.guild.id), "ping").get("language") or "en")  # type: ignore[union-attr]
+        await self.send_dashboard_ping(ctx.channel, ctx.author.display_name, language)  # type: ignore[arg-type]
 
     @commands.command(name="server")
     async def server(self, ctx: commands.Context[commands.Bot]) -> None:
-        await ctx.send(embed=server_embed(ctx.guild))  # type: ignore[arg-type]
+        language = str(store.command_config(str(ctx.guild.id), "server").get("language") or "en")  # type: ignore[union-attr]
+        await ctx.send(embed=server_embed(ctx.guild, language))  # type: ignore[arg-type]
 
     @commands.command(name="profile")
     async def profile(self, ctx: commands.Context[commands.Bot], member: discord.Member | None = None) -> None:
-        await ctx.send(embed=profile_embed(member or ctx.author))  # type: ignore[arg-type]
+        language = str(store.command_config(str(ctx.guild.id), "profile").get("language") or "en")  # type: ignore[union-attr]
+        await ctx.send(embed=profile_embed(member or ctx.author, language))  # type: ignore[arg-type]
 
     @commands.command(name="kick")
     @commands.has_guild_permissions(kick_members=True)
@@ -1620,7 +1645,8 @@ class General(commands.Cog):
         problem = self.moderation_problem(ctx.guild, member)  # type: ignore[arg-type]
         if problem: await ctx.send(problem); return
         await member.kick(reason=reason or f"Requested by {ctx.author}")
-        await ctx.send(f"({member.mention}) has been Kicked from the server")
+        language = str(store.command_config(str(ctx.guild.id), "kick").get("language") or "en")  # type: ignore[union-attr]
+        await ctx.send(command_message("kick", language, "success", member=member.mention))
 
     @commands.command(name="ban")
     @commands.has_guild_permissions(ban_members=True)
@@ -1628,24 +1654,28 @@ class General(commands.Cog):
         problem = self.moderation_problem(ctx.guild, member)  # type: ignore[arg-type]
         if problem: await ctx.send(problem); return
         await member.ban(reason=reason or f"Requested by {ctx.author}", delete_message_seconds=delete_message_days * 86_400)
-        await ctx.send(f"{member.mention} has been Banned from the server")
+        language = str(store.command_config(str(ctx.guild.id), "ban").get("language") or "en")  # type: ignore[union-attr]
+        await ctx.send(command_message("ban", language, "success", member=member.mention))
 
     @app_commands.command(name="ping", description="Check BirdBot's connection and uptime.")
     async def slash_ping(self, interaction: discord.Interaction) -> None:
         if await self.active_interaction(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Connection check", description=f"Gateway: {round(self.bot.latency * 1000)}ms", colour=discord.Colour.from_rgb(255, 255, 255)))
+            language = str(store.command_config(str(interaction.guild.id), "ping").get("language") or "en")  # type: ignore[union-attr]
+            await interaction.response.send_message(embed=discord.Embed(title=command_message("ping", language, "title"), description=f"{command_message('ping', language, 'gateway')}: {round(self.bot.latency * 1000)}ms", colour=discord.Colour.from_rgb(255, 255, 255)))
 
     @app_commands.command(name="server", description="Show information about this server.")
     async def slash_server(self, interaction: discord.Interaction) -> None:
         if not await self.active_interaction(interaction): return
         await interaction.response.defer(thinking=True)
-        await interaction.followup.send(embed=server_embed(interaction.guild))  # type: ignore[arg-type]
+        language = str(store.command_config(str(interaction.guild.id), "server").get("language") or "en")  # type: ignore[union-attr]
+        await interaction.followup.send(embed=server_embed(interaction.guild, language))  # type: ignore[arg-type]
 
     @app_commands.command(name="profile", description="Show a member's profile.")
     async def slash_profile(self, interaction: discord.Interaction, user: discord.Member | None = None) -> None:
         if not await self.active_interaction(interaction): return
         await interaction.response.defer(thinking=True)
-        await interaction.followup.send(embed=profile_embed(user or interaction.user))  # type: ignore[arg-type]
+        language = str(store.command_config(str(interaction.guild.id), "profile").get("language") or "en")  # type: ignore[union-attr]
+        await interaction.followup.send(embed=profile_embed(user or interaction.user, language))  # type: ignore[arg-type]
 
     @app_commands.command(name="kick", description="Kick a member from this server.")
     @app_commands.default_permissions(kick_members=True)
@@ -1653,11 +1683,13 @@ class General(commands.Cog):
         if not await self.active_interaction(interaction): return
         await interaction.response.defer(ephemeral=True, thinking=True)
         if not interaction.user.guild_permissions.kick_members:
-            await interaction.followup.send("You need Kick Members permission.", ephemeral=True); return
+            language = str(store.command_config(str(interaction.guild.id), "kick").get("language") or "en")  # type: ignore[union-attr]
+            await interaction.followup.send(command_message("kick", language, "permission"), ephemeral=True); return
         problem = self.moderation_problem(interaction.guild, user)  # type: ignore[arg-type]
         if problem: await interaction.followup.send(problem, ephemeral=True); return
         await user.kick(reason=reason or f"Requested by {interaction.user}")
-        await interaction.followup.send(f"({user.mention}) has been Kicked from the server", ephemeral=True)
+        language = str(store.command_config(str(interaction.guild.id), "kick").get("language") or "en")  # type: ignore[union-attr]
+        await interaction.followup.send(command_message("kick", language, "success", member=user.mention), ephemeral=True)
 
     @app_commands.command(name="ban", description="Ban a member from this server.")
     @app_commands.default_permissions(ban_members=True)
@@ -1665,19 +1697,23 @@ class General(commands.Cog):
         if not await self.active_interaction(interaction): return
         await interaction.response.defer(ephemeral=True, thinking=True)
         if not interaction.user.guild_permissions.ban_members:
-            await interaction.followup.send("You need Ban Members permission.", ephemeral=True); return
+            language = str(store.command_config(str(interaction.guild.id), "ban").get("language") or "en")  # type: ignore[union-attr]
+            await interaction.followup.send(command_message("ban", language, "permission"), ephemeral=True); return
         problem = self.moderation_problem(interaction.guild, user)  # type: ignore[arg-type]
         if problem: await interaction.followup.send(problem, ephemeral=True); return
         await user.ban(reason=reason or f"Requested by {interaction.user}", delete_message_seconds=delete_message_days * 86_400)
-        await interaction.followup.send(f"{user.mention} has been Banned from the server", ephemeral=True)
+        language = str(store.command_config(str(interaction.guild.id), "ban").get("language") or "en")  # type: ignore[union-attr]
+        await interaction.followup.send(command_message("ban", language, "success", member=user.mention), ephemeral=True)
 
     @kick.error
     @ban.error
     async def moderation_error(self, ctx: commands.Context[commands.Bot], error: commands.CommandError) -> None:
+        command_name = str(ctx.command.qualified_name if ctx.command else "").split(" ", 1)[0]
+        arabic = bool(ctx.guild and store.command_config(str(ctx.guild.id), command_name).get("language") == "ar") if command_name else False
         if isinstance(error, commands.MissingPermissions):
-            await ctx.send("You do not have permission to use that command.")
+            await ctx.send(command_message("common", "ar" if arabic else "en", "permission"))
         elif isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("Choose a member first.")
+            await ctx.send(command_message(command_name, "ar" if arabic else "en", "missing_member"))
         else:
             raise error
 

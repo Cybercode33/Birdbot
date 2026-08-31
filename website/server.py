@@ -35,7 +35,7 @@ from settings import (  # noqa: E402
     SPOTIFY_PREMIUM_REQUIRED,
     SPOTIFY_PREMIUM_USER_IDS,
 )
-from storage import store, utc_now  # noqa: E402
+from storage import DASHBOARD_COMMAND_NAMES, store, utc_now  # noqa: E402
 
 DISCORD_API = "https://discord.com/api/v10"
 ADMINISTRATOR = 0x8
@@ -1153,6 +1153,13 @@ async def manage_guild(guild_id: str, request: Request) -> dict[str, object]:
     activation = store.activation_for_guild(guild_id)
     if not activation or not activation["activated"]:
         raise HTTPException(status_code=409, detail="Enable BirdBot for this server before managing it.")
+    commands = [
+        {"name": "ping", "label": "/ping", "description": "Check BirdBot's connection and uptime."},
+        {"name": "server", "label": "/server", "description": "Show server information."},
+        {"name": "profile", "label": "/profile", "description": "Show a member profile."},
+        {"name": "kick", "label": "/kick", "description": "Remove a member from the server."},
+        {"name": "ban", "label": "/ban", "description": "Ban a member from the server."},
+    ]
     return {
         "guild": {**bot_guild, "activated": True},
         "profile": public_bot_profile(store.bot_profile(guild_id)),
@@ -1162,14 +1169,77 @@ async def manage_guild(guild_id: str, request: Request) -> dict[str, object]:
         # the complete roster through /members/search when needed.
         "members": store.bot_members(guild_id, limit=100),
         "bans": store.bot_bans(guild_id),
-        "commands": [
-            {"name": "ping", "label": "/ping", "description": "Check BirdBot's connection and uptime."},
-            {"name": "server", "label": "/server", "description": "Show server information."},
-            {"name": "profile", "label": "/profile", "description": "Show a member profile."},
-            {"name": "kick", "label": "/kick", "description": "Remove a member from the server."},
-            {"name": "ban", "label": "/ban", "description": "Ban a member from the server."},
-        ],
+        "commands": commands,
+        "command_settings": store.command_settings(guild_id),
     }
+
+
+def parse_command_settings(payload: object) -> tuple[str, bool, dict[str, dict[str, object]]]:
+    """Validate and normalize the Commands tab payload before persistence."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid command settings.")
+    raw_prefix = payload.get("prefix")
+    if not isinstance(raw_prefix, str):
+        raise HTTPException(status_code=400, detail="Enter a command prefix.")
+    # Discord.py accepts arbitrary non-empty prefix strings, including spaces,
+    # emoji, and punctuation. Preserve the exact text the manager entered so
+    # the gateway and the dashboard display/use the same value.
+    prefix = raw_prefix
+    if not prefix:
+        raise HTTPException(status_code=400, detail="Enter at least one character for the prefix.")
+    prefix_enabled = bool(payload.get("prefix_enabled", True))
+    raw_commands = payload.get("commands")
+    if not isinstance(raw_commands, dict):
+        raise HTTPException(status_code=400, detail="Command settings are missing.")
+    normalized: dict[str, dict[str, object]] = {}
+    seen_shortcuts: set[str] = set()
+    command_names = set(DASHBOARD_COMMAND_NAMES)
+    for command_name in DASHBOARD_COMMAND_NAMES:
+        raw_config = raw_commands.get(command_name, {})
+        if not isinstance(raw_config, dict):
+            raw_config = {}
+        language = str(raw_config.get("language") or "en").casefold()
+        if language not in {"en", "ar"}:
+            raise HTTPException(status_code=400, detail=f"Choose English or Arabic for {command_name}.")
+        raw_shortcuts = raw_config.get("shortcuts", [])
+        if isinstance(raw_shortcuts, str):
+            raw_shortcuts = raw_shortcuts.split(",")
+        if not isinstance(raw_shortcuts, list) or len(raw_shortcuts) > 10:
+            raise HTTPException(status_code=400, detail=f"Use up to 10 shortcuts for {command_name}.")
+        shortcuts: list[str] = []
+        for raw_shortcut in raw_shortcuts:
+            if not isinstance(raw_shortcut, str):
+                raise HTTPException(status_code=400, detail=f"Shortcuts for {command_name} must be text.")
+            shortcut = raw_shortcut.strip()
+            if not shortcut:
+                continue
+            normalized_shortcut = shortcut.casefold()
+            if not 1 <= len(shortcut) <= 32 or any(character.isspace() for character in shortcut) or shortcut.startswith(prefix):
+                raise HTTPException(status_code=400, detail=f"Each {command_name} shortcut must be 1–32 characters, without spaces, and must not include the prefix.")
+            if normalized_shortcut in command_names or normalized_shortcut in seen_shortcuts:
+                raise HTTPException(status_code=400, detail=f"The shortcut '{shortcut}' is already used by another command.")
+            seen_shortcuts.add(normalized_shortcut)
+            shortcuts.append(shortcut)
+        normalized[command_name] = {
+            "enabled": bool(raw_config.get("enabled", True)),
+            "language": language,
+            "shortcuts": shortcuts,
+        }
+    return prefix, prefix_enabled, normalized
+
+
+@app.post("/api/guilds/{guild_id}/control/commands/settings")
+async def save_command_settings(guild_id: str, request: Request) -> dict[str, object]:
+    user, _ = await verified_guild_manager(guild_id, request)
+    if not store.is_guild_activated(guild_id):
+        raise HTTPException(status_code=409, detail="Enable BirdBot for this server before changing command settings.")
+    try:
+        payload = await request.json()
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid command settings.") from error
+    prefix, prefix_enabled, commands = parse_command_settings(payload)
+    settings = store.save_command_settings(guild_id, prefix, prefix_enabled, commands, str(user["id"]))
+    return {"command_settings": settings, "status": "saved"}
 
 
 def spy_game_dashboard_config(guild_id: str | None = None) -> dict[str, object]:
@@ -2258,6 +2328,8 @@ async def queue_dashboard_command(guild_id: str, command_name: str, request: Req
     user, _ = await verified_guild_manager(guild_id, request)
     if not store.is_guild_activated(guild_id):
         raise HTTPException(status_code=409, detail="Enable BirdBot for this server before using commands.")
+    if command_name in DASHBOARD_COMMAND_NAMES and not store.command_config(guild_id, command_name).get("enabled", True):
+        raise HTTPException(status_code=409, detail="That command is disabled for this server. Enable it in the Commands tab first.")
     try:
         payload = await request.json()
     except ValueError as error:

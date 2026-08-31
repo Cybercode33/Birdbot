@@ -1361,7 +1361,7 @@ function setManagementTab(tab) {
     return;
   }
   managementTitle.textContent = "Commands";
-  managementDescription.textContent = "Choose a command, then choose the text channel where BirdBot should run it.";
+  managementDescription.textContent = "Set the prefix, shortcuts, and reply language for each command, then choose where dashboard actions should run.";
   renderCommands();
 }
 
@@ -1970,17 +1970,164 @@ async function runDeleteAllTicketLogs(button) {
 
 function renderCommands() {
   commandGrid.replaceChildren();
+  const saved = managementData.command_settings || {};
+  const draft = {
+    prefix: typeof saved.prefix === "string" && saved.prefix ? saved.prefix : "!",
+    prefix_enabled: saved.prefix_enabled !== false,
+    commands: {},
+  };
   managementData.commands.forEach((command) => {
+    const setting = saved.commands?.[command.name] || {};
+    draft.commands[command.name] = {
+      enabled: setting.enabled !== false,
+      language: setting.language === "ar" ? "ar" : "en",
+      shortcuts: Array.isArray(setting.shortcuts) ? [...setting.shortcuts] : [],
+    };
+  });
+
+  const toolbar = document.createElement("section");
+  toolbar.className = "commands-settings-toolbar";
+  const toolbarHeading = document.createElement("div");
+  toolbarHeading.className = "commands-settings-heading";
+  toolbarHeading.append(
+    textElement("strong", "", "Prefix commands"),
+    textElement("p", "command-settings-hint", "Configure how text commands work in this server. Shortcuts only work with the prefix."),
+  );
+  const toolbarControls = document.createElement("div");
+  toolbarControls.className = "commands-settings-controls";
+  const prefixField = document.createElement("label");
+  prefixField.className = "commands-prefix-field";
+  prefixField.append(textElement("span", "command-field-label", "Prefix:"));
+  const prefixInput = document.createElement("input");
+  prefixInput.className = "channel-select commands-prefix-input";
+  prefixInput.type = "text";
+  prefixInput.value = draft.prefix;
+  prefixInput.placeholder = "!";
+  prefixInput.setAttribute("aria-label", "Command prefix");
+  prefixInput.addEventListener("input", () => {
+    draft.prefix = prefixInput.value;
+    commandGrid.querySelectorAll("[data-command-preview]").forEach((element) => {
+      element.textContent = `${draft.prefix || "!"}${element.dataset.commandPreview}`;
+    });
+    commandGrid.querySelectorAll("[data-command-run-label]").forEach((element) => {
+      element.textContent = `Run ${draft.prefix || "!"}${element.dataset.commandRunLabel}`;
+    });
+  });
+  prefixField.append(prefixInput);
+  const prefixToggleLabel = document.createElement("label");
+  prefixToggleLabel.className = "command-inline-toggle";
+  const prefixToggle = document.createElement("input");
+  prefixToggle.type = "checkbox";
+  prefixToggle.checked = draft.prefix_enabled;
+  prefixToggle.addEventListener("change", () => { draft.prefix_enabled = prefixToggle.checked; });
+  prefixToggleLabel.append(prefixToggle, textElement("span", "", "Enable prefix commands"));
+  const saveButton = document.createElement("button");
+  saveButton.className = "primary-button command-settings-save";
+  saveButton.type = "button";
+  saveButton.textContent = "Save settings";
+  const saveStatus = textElement("span", "command-settings-status", "");
+  saveButton.addEventListener("click", async () => {
+    saveButton.disabled = true;
+    saveStatus.textContent = "Saving...";
+    saveStatus.className = "command-settings-status is-loading";
+    try {
+      const result = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/control/commands/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(draft),
+      });
+      managementData.command_settings = result.command_settings;
+      saveStatus.textContent = "Saved and applied to Discord.";
+      saveStatus.className = "command-settings-status is-success";
+      renderCommands();
+      commandFeedback.hidden = false;
+      commandFeedback.textContent = "Command settings saved. Prefix commands now use the new configuration.";
+    } catch (error) {
+      saveStatus.textContent = errorMessage(error, "Command settings could not be saved.");
+      saveStatus.className = "command-settings-status is-error";
+    } finally {
+      saveButton.disabled = false;
+    }
+  });
+  toolbarControls.append(prefixField, prefixToggleLabel, saveButton, saveStatus);
+  toolbar.append(toolbarHeading, toolbarControls);
+  commandGrid.append(toolbar);
+
+  managementData.commands.forEach((command) => {
+    const setting = draft.commands[command.name];
     const card = document.createElement("article");
-    card.className = `command-card${command.name === "ban" ? " ban-command-card" : ""}`;
+    card.className = `command-card${command.name === "ban" ? " ban-command-card" : ""}${setting.enabled ? "" : " command-card-disabled"}`;
     const button = document.createElement("button");
     button.className = "command-button";
     button.type = "button";
-    button.textContent = command.label;
+    button.dataset.commandPreview = command.name;
+    button.textContent = `${draft.prefix}${command.name}`;
     const description = textElement("p", "command-description", command.description);
     const config = document.createElement("div");
     config.className = "command-config";
     config.hidden = true;
+    const enabledLabel = document.createElement("label");
+    enabledLabel.className = "command-inline-toggle command-setting-toggle";
+    const enabledInput = document.createElement("input");
+    enabledInput.type = "checkbox";
+    enabledInput.checked = setting.enabled;
+    enabledInput.addEventListener("change", () => {
+      setting.enabled = enabledInput.checked;
+      card.classList.toggle("command-card-disabled", !setting.enabled);
+      runButton.disabled = !managementData.channels.length || !setting.enabled;
+    });
+    enabledLabel.append(enabledInput, textElement("span", "", "Enable this command"));
+    const shortcutsField = document.createElement("div");
+    shortcutsField.className = "command-shortcuts-field";
+    const shortcutList = document.createElement("div");
+    shortcutList.className = "command-shortcuts-list";
+    const shortcutEntries = [];
+    const syncShortcuts = () => {
+      setting.shortcuts = shortcutEntries.map((entry) => entry.value).filter((value) => value.trim());
+    };
+    const addShortcutField = (value = "") => {
+      const entry = { value };
+      shortcutEntries.push(entry);
+      const row = document.createElement("div");
+      row.className = "command-shortcut-row";
+      const shortcutInput = document.createElement("input");
+      shortcutInput.className = "channel-select command-shortcut-input";
+      shortcutInput.type = "text";
+      shortcutInput.maxLength = 32;
+      shortcutInput.value = value;
+      shortcutInput.placeholder = "Shortcut, for example pong";
+      shortcutInput.addEventListener("input", () => {
+        entry.value = shortcutInput.value;
+        syncShortcuts();
+      });
+      const removeShortcut = document.createElement("button");
+      removeShortcut.className = "secondary-button command-shortcut-remove";
+      removeShortcut.type = "button";
+      removeShortcut.textContent = "Remove";
+      removeShortcut.addEventListener("click", () => {
+        const index = shortcutEntries.indexOf(entry);
+        if (index >= 0) shortcutEntries.splice(index, 1);
+        row.remove();
+        syncShortcuts();
+      });
+      row.append(shortcutInput, removeShortcut);
+      shortcutList.append(row);
+      syncShortcuts();
+    };
+    setting.shortcuts.forEach((shortcut) => addShortcutField(String(shortcut)));
+    if (!setting.shortcuts.length) addShortcutField();
+    const addShortcut = document.createElement("button");
+    addShortcut.className = "secondary-button command-shortcut-add";
+    addShortcut.type = "button";
+    addShortcut.textContent = "+ Add shortcut";
+    addShortcut.addEventListener("click", () => addShortcutField());
+    shortcutsField.append(shortcutList, addShortcut);
+    const languageSelect = document.createElement("select");
+    languageSelect.className = "channel-select command-language-select";
+    languageSelect.append(new Option("English replies", "en"), new Option("Arabic replies", "ar"));
+    languageSelect.value = setting.language;
+    languageSelect.addEventListener("change", () => { setting.language = languageSelect.value; });
+    config.append(enabledLabel, labeledControl("Shortcuts (without the prefix)", shortcutsField), labeledControl("Reply language", languageSelect));
     const select = createChannelSelect();
     let memberSelect = null;
     if (["profile", "kick", "ban"].includes(command.name)) {
@@ -2031,8 +2178,9 @@ function renderCommands() {
     const runButton = document.createElement("button");
     runButton.className = "primary-button";
     runButton.type = "button";
-    runButton.textContent = command.name === "server" ? "Send Server Info" : `Run ${command.label}`;
-    runButton.disabled = !managementData.channels.length;
+    runButton.disabled = !managementData.channels.length || !setting.enabled;
+    if (command.name !== "server") runButton.dataset.commandRunLabel = command.name;
+    runButton.textContent = command.name === "server" ? "Send Server Info" : `Run ${draft.prefix}${command.name}`;
     button.addEventListener("click", () => { config.hidden = !config.hidden; });
     runButton.addEventListener("click", () => runWebsiteCommand(command.name, select, runButton, {
       member_id: memberSelect?.value,
@@ -2243,6 +2391,13 @@ const delay = waitFor;
 
 async function runWebsiteCommand(commandName, select, button, payload = {}) {
   if (button.disabled) return;
+  const commandSettings = managementData.command_settings?.commands?.[commandName];
+  if (commandSettings && commandSettings.enabled === false) {
+    commandFeedback.hidden = false;
+    commandFeedback.textContent = "That command is disabled. Enable it from the Commands settings first.";
+    return;
+  }
+  const commandPrefix = managementData.command_settings?.prefix || "!";
   if (!select.value) {
     commandFeedback.hidden = false;
     commandFeedback.textContent = "Choose a text channel first.";
@@ -2255,7 +2410,7 @@ async function runWebsiteCommand(commandName, select, button, payload = {}) {
   }
   button.disabled = true;
   button.textContent = "Sending...";
-  beginLoading(`Sending /${commandName} to BirdBot...`);
+  beginLoading(`Sending ${commandPrefix}${commandName} to BirdBot...`);
   try {
     const queued = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/commands/${commandName}`, {
       method: "POST",
@@ -2263,7 +2418,7 @@ async function runWebsiteCommand(commandName, select, button, payload = {}) {
       body: JSON.stringify({ channel_id: select.value, ...payload }),
     });
     commandFeedback.hidden = false;
-    commandFeedback.textContent = `/${commandName} is being sent to the selected channel...`;
+    commandFeedback.textContent = `${commandPrefix}${commandName} is being sent to the selected channel...`;
     for (let attempt = 0; attempt < 30; attempt += 1) {
       // The bot worker checks its queue every two seconds; a shorter poll
       // interval makes completed commands feel immediate without waiting for
@@ -2275,8 +2430,8 @@ async function runWebsiteCommand(commandName, select, button, payload = {}) {
           ? "@user has been Kicked from the server"
           : commandName === "ban" ? "@user has been Banned from the server" : "";
         commandFeedback.textContent = announcement
-          ? `/${commandName} completed. ${announcement}`
-          : `/${commandName} was sent successfully.`;
+          ? `${commandPrefix}${commandName} completed. ${announcement}`
+          : `${commandPrefix}${commandName} was sent successfully.`;
         if (commandName === "ban" || commandName === "unban") {
           const bans = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/bans`);
           managementData.bans = bans.bans;
@@ -2286,14 +2441,14 @@ async function runWebsiteCommand(commandName, select, button, payload = {}) {
       }
       if (status.status === "failed") throw new Error(status.error || "BirdBot could not run that command.");
     }
-    commandFeedback.textContent = `/${commandName} is still queued. Check the selected channel shortly.`;
+    commandFeedback.textContent = `${commandPrefix}${commandName} is still queued. Check the selected channel shortly.`;
   } catch (error) {
     commandFeedback.hidden = false;
     commandFeedback.textContent = errorMessage(error, "BirdBot could not run that command.");
   } finally {
     endLoading();
     button.disabled = false;
-    button.textContent = commandName === "server" ? "Send Server Info" : `Run /${commandName}`;
+    button.textContent = commandName === "server" ? "Send Server Info" : `Run ${commandPrefix}${commandName}`;
   }
 }
 

@@ -10,13 +10,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from settings import DATA_PATH
+from settings import COMMAND_PREFIX, DATA_PATH
 
 
 # Tickets that remain unclaimed for this period are automatically archived by
 # the single connected Discord bot.  Keep the value in the shared store so the
 # dashboard and bot use the same policy.
 UNCLAIMED_TICKET_TIMEOUT_SECONDS = 300
+
+# Commands exposed by the website's Commands tab. Keeping this list in the
+# shared store makes the API and Discord worker agree on valid settings.
+DASHBOARD_COMMAND_NAMES = ("ping", "server", "profile", "kick", "ban")
 
 
 def utc_now() -> str:
@@ -94,6 +98,31 @@ class BirdBotStore:
                     avatar_url TEXT,
                     updated_by TEXT,
                     updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS guild_command_settings (
+                    guild_id TEXT PRIMARY KEY,
+                    prefix TEXT NOT NULL DEFAULT '!',
+                    prefix_enabled INTEGER NOT NULL DEFAULT 1,
+                    updated_by TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS command_configs (
+                    guild_id TEXT NOT NULL,
+                    command_name TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    language TEXT NOT NULL DEFAULT 'en',
+                    shortcuts TEXT NOT NULL DEFAULT '[]',
+                    updated_by TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, command_name)
                 )
                 """
             )
@@ -625,6 +654,125 @@ class BirdBotStore:
             )
         self._invalidate_cache()
         return self.bot_profile(str(guild_id))
+
+    @staticmethod
+    def _default_command_config(guild_id: str, command_name: str) -> dict[str, object]:
+        return {
+            "guild_id": str(guild_id),
+            "command_name": str(command_name),
+            "enabled": True,
+            "language": "en",
+            "shortcuts": [],
+            "updated_by": None,
+            "updated_at": None,
+        }
+
+    def command_settings(self, guild_id: str) -> dict[str, object]:
+        """Return the per-server prefix and command settings.
+
+        Missing rows behave like the historical configuration: the environment
+        prefix is enabled and every dashboard command is enabled.
+        """
+        guild_id = str(guild_id)
+        key = f"command_settings:{guild_id}"
+        cached = self._cache_get(key)
+        if cached is not self._CACHE_MISS:
+            return cached  # type: ignore[return-value]
+        with self._connect() as connection:
+            prefix_row = connection.execute(
+                "SELECT prefix, prefix_enabled, updated_by, updated_at FROM guild_command_settings WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+            rows = connection.execute(
+                "SELECT command_name, enabled, language, shortcuts, updated_by, updated_at FROM command_configs WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchall()
+        prefix = str(prefix_row["prefix"] if prefix_row and prefix_row["prefix"] else COMMAND_PREFIX)
+        prefix_enabled = bool(prefix_row["prefix_enabled"]) if prefix_row else True
+        commands = {name: self._default_command_config(guild_id, name) for name in DASHBOARD_COMMAND_NAMES}
+        for row in rows:
+            name = str(row["command_name"])
+            if name not in commands:
+                continue
+            try:
+                shortcuts = json.loads(row["shortcuts"] or "[]")
+            except (TypeError, ValueError):
+                shortcuts = []
+            if not isinstance(shortcuts, list):
+                shortcuts = []
+            commands[name] = {
+                "guild_id": guild_id,
+                "command_name": name,
+                "enabled": bool(row["enabled"]),
+                "language": str(row["language"] or "en") if row["language"] in {"en", "ar"} else "en",
+                "shortcuts": [str(value) for value in shortcuts if isinstance(value, str)],
+                "updated_by": row["updated_by"],
+                "updated_at": row["updated_at"],
+            }
+        result = {
+            "guild_id": guild_id,
+            "prefix": prefix,
+            "prefix_enabled": prefix_enabled,
+            "updated_by": prefix_row["updated_by"] if prefix_row else None,
+            "updated_at": prefix_row["updated_at"] if prefix_row else None,
+            "commands": commands,
+        }
+        # Prefix/shortcut changes are expected to be felt immediately by the
+        # Discord gateway, so keep this cache deliberately short-lived.
+        return self._cache_set(key, result, ttl=2.0)  # type: ignore[return-value]
+
+    def command_config(self, guild_id: str, command_name: str) -> dict[str, object]:
+        settings = self.command_settings(str(guild_id))
+        commands = settings.get("commands")
+        if isinstance(commands, dict) and command_name in commands:
+            return commands[command_name]  # type: ignore[return-value]
+        return self._default_command_config(str(guild_id), str(command_name))
+
+    def command_for_shortcut(self, guild_id: str, shortcut: str) -> dict[str, object] | None:
+        normalized = str(shortcut).casefold()
+        settings = self.command_settings(str(guild_id))
+        commands = settings.get("commands")
+        if not isinstance(commands, dict):
+            return None
+        for config in commands.values():
+            if not isinstance(config, dict) or not config.get("enabled"):
+                continue
+            shortcuts = config.get("shortcuts")
+            if isinstance(shortcuts, list) and any(str(value).casefold() == normalized for value in shortcuts):
+                return config
+        return None
+
+    def save_command_settings(
+        self,
+        guild_id: str,
+        prefix: str,
+        prefix_enabled: bool,
+        commands: dict[str, dict[str, object]],
+        updated_by: str | None = None,
+    ) -> dict[str, object]:
+        guild_id = str(guild_id)
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO guild_command_settings (guild_id, prefix, prefix_enabled, updated_by, updated_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(guild_id) DO UPDATE SET prefix = excluded.prefix, prefix_enabled = excluded.prefix_enabled, updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+                (guild_id, prefix, int(bool(prefix_enabled)), updated_by, now),
+            )
+            for command_name, config in commands.items():
+                if command_name not in DASHBOARD_COMMAND_NAMES:
+                    continue
+                shortcuts = config.get("shortcuts") if isinstance(config, dict) else []
+                encoded_shortcuts = json.dumps(shortcuts if isinstance(shortcuts, list) else [], ensure_ascii=False)
+                language = str(config.get("language") if isinstance(config, dict) else "en")
+                if language not in {"en", "ar"}:
+                    language = "en"
+                connection.execute(
+                    "INSERT INTO command_configs (guild_id, command_name, enabled, language, shortcuts, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(guild_id, command_name) DO UPDATE SET enabled = excluded.enabled, language = excluded.language, shortcuts = excluded.shortcuts, updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+                    (guild_id, command_name, int(bool(config.get("enabled", True))), language, encoded_shortcuts, updated_by, now),
+                )
+        self._invalidate_cache()
+        return self.command_settings(guild_id)
 
     def bot_text_channels(self, guild_id: str) -> list[dict[str, str]]:
         key = f"bot_text_channels:{guild_id}"

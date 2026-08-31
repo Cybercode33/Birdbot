@@ -572,6 +572,30 @@ body.is-preloading main, body.is-preloading .site-header { pointer-events: none;
 @media (max-width: 620px) { .game-catalog-card { align-items: flex-start; flex-wrap: wrap; }.game-catalog-enable { width: 100%; margin-left: 0; } }
 @media (max-width: 620px) { .roulette-palette-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 
+.commands-settings-toolbar { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 1rem; margin-bottom: 1rem; padding: .95rem 1rem; border: 1px solid rgba(255,255,255,.16); border-radius: 12px; background: linear-gradient(135deg, rgba(35,35,35,.78), rgba(16,16,16,.9)); }
+.commands-settings-heading { display: grid; gap: .25rem; min-width: 0; }
+.commands-settings-heading strong { font-size: .95rem; }
+.command-settings-hint { margin: 0; color: #999; font-size: .72rem; line-height: 1.45; }
+.commands-settings-controls { display: flex; align-items: end; justify-content: flex-end; gap: .55rem; flex-wrap: wrap; }
+.commands-prefix-field { display: grid; gap: .3rem; min-width: 8rem; color: #aaa; font: .62rem "DM Mono", monospace; text-transform: uppercase; letter-spacing: .05em; }
+.commands-prefix-input { width: 8rem; min-height: 2.35rem; box-sizing: border-box; }
+.command-inline-toggle { display: inline-flex; align-items: center; gap: .45rem; min-height: 2.35rem; color: #ccc; font-size: .7rem; white-space: nowrap; cursor: pointer; }
+.command-inline-toggle input { width: 1rem; height: 1rem; accent-color: #fff; }
+.command-settings-save { min-height: 2.35rem; white-space: nowrap; }
+.command-settings-status { min-height: 1rem; color: #999; font: .62rem "DM Mono", monospace; }
+.command-settings-status.is-loading { color: #ddd; }
+.command-settings-status.is-success { color: #62e59c; }
+.command-settings-status.is-error { color: #ff9c9c; max-width: 18rem; }
+.command-card-disabled { border-color: rgba(255,255,255,.08); opacity: .65; }
+.command-card-disabled .command-button { color: #999; }
+.command-setting-toggle { margin-bottom: .1rem; }
+.command-shortcuts-field { display: grid; gap: .45rem; }
+.command-shortcuts-list { display: grid; gap: .45rem; }
+.command-shortcut-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .45rem; align-items: center; }
+.command-shortcut-input, .command-language-select { width: 100%; box-sizing: border-box; }
+.command-shortcut-add, .command-shortcut-remove { width: max-content; padding: .45rem .65rem; font-size: .62rem; }
+@media (max-width: 760px) { .commands-settings-toolbar { grid-template-columns: 1fr; align-items: stretch; }.commands-settings-controls { justify-content: flex-start; } }
+
 /* Game details are intentionally a single vertical flow.  The generic Spy
    hero uses a background image, while Roulette supplies its banner as a real
    image element; keep that hero background flat to prevent double renders. */
