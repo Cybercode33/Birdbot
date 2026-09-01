@@ -35,7 +35,8 @@ from settings import (  # noqa: E402
     SPOTIFY_PREMIUM_REQUIRED,
     SPOTIFY_PREMIUM_USER_IDS,
 )
-from storage import DASHBOARD_COMMAND_NAMES, store, utc_now  # noqa: E402
+from role_permissions import ROLE_PERMISSION_FIELDS, ROLE_PERMISSION_KEYS  # noqa: E402
+from storage import DASHBOARD_COMMAND_NAMES, LOG_CATEGORIES, store, utc_now  # noqa: E402
 
 DISCORD_API = "https://discord.com/api/v10"
 ADMINISTRATOR = 0x8
@@ -1159,18 +1160,31 @@ async def manage_guild(guild_id: str, request: Request) -> dict[str, object]:
         {"name": "profile", "label": "/profile", "description": "Show a member profile."},
         {"name": "kick", "label": "/kick", "description": "Remove a member from the server."},
         {"name": "ban", "label": "/ban", "description": "Ban a member from the server."},
+        {"name": "warning", "label": "/warning", "description": "Give a numbered warning to a member."},
+        {"name": "unwarning", "label": "/unwarning", "description": "Remove a warning by its unique number."},
+        {"name": "show_warning", "label": "/show warning", "description": "View a member's active warnings."},
+        {"name": "timeout", "label": "/timeout", "description": "Temporarily timeout a member."},
+        {"name": "lock", "label": "/lock", "description": "Lock the selected channel for @everyone."},
+        {"name": "unlock", "label": "/unlock", "description": "Unlock the selected channel for @everyone."},
+        {"name": "delete", "label": "/delete", "description": "Delete recent messages from a channel."},
     ]
     return {
         "guild": {**bot_guild, "activated": True},
         "profile": public_bot_profile(store.bot_profile(guild_id)),
         "channels": store.bot_text_channels(guild_id),
         "roles": store.bot_roles(guild_id),
+        "role_permission_fields": [
+            {"key": key, "label": label, "description": description}
+            for key, label, description in ROLE_PERMISSION_FIELDS
+        ],
         # Keep the initial management payload small. The member picker searches
         # the complete roster through /members/search when needed.
         "members": store.bot_members(guild_id, limit=100),
         "bans": store.bot_bans(guild_id),
         "commands": commands,
         "command_settings": store.command_settings(guild_id),
+        "log_config": store.log_config(guild_id),
+        "auto_reacts": store.auto_reacts(guild_id),
     }
 
 
@@ -1214,8 +1228,8 @@ def parse_command_settings(payload: object) -> tuple[str, bool, dict[str, dict[s
             if not shortcut:
                 continue
             normalized_shortcut = shortcut.casefold()
-            if not 1 <= len(shortcut) <= 32 or any(character.isspace() for character in shortcut) or shortcut.startswith(prefix):
-                raise HTTPException(status_code=400, detail=f"Each {command_name} shortcut must be 1–32 characters, without spaces, and must not include the prefix.")
+            if not 1 <= len(shortcut) <= 32 or any(character.isspace() for character in shortcut):
+                raise HTTPException(status_code=400, detail=f"Each {command_name} shortcut must be 1-32 characters, without spaces.")
             if normalized_shortcut in command_names or normalized_shortcut in seen_shortcuts:
                 raise HTTPException(status_code=400, detail=f"The shortcut '{shortcut}' is already used by another command.")
             seen_shortcuts.add(normalized_shortcut)
@@ -1240,6 +1254,73 @@ async def save_command_settings(guild_id: str, request: Request) -> dict[str, ob
     prefix, prefix_enabled, commands = parse_command_settings(payload)
     settings = store.save_command_settings(guild_id, prefix, prefix_enabled, commands, str(user["id"]))
     return {"command_settings": settings, "status": "saved"}
+
+
+@app.get("/api/guilds/{guild_id}/logs")
+async def guild_logs(guild_id: str, request: Request, q: str = "") -> dict[str, object]:
+    """Return general server activity logs and the current log configuration."""
+    await verified_guild_manager(guild_id, request)
+    if not store.is_guild_activated(guild_id):
+        raise HTTPException(status_code=409, detail="Enable BirdBot for this server before viewing logs.")
+    return {"logs": store.logs(guild_id, q[:120], limit=500), "log_config": store.log_config(guild_id)}
+
+
+@app.post("/api/guilds/{guild_id}/control/logs")
+async def save_guild_log_config(guild_id: str, request: Request) -> dict[str, object]:
+    """Validate and persist the destination/categories for general logs."""
+    user, _ = await verified_guild_manager(guild_id, request)
+    if not store.is_guild_activated(guild_id):
+        raise HTTPException(status_code=409, detail="Enable BirdBot for this server before changing log settings.")
+    try:
+        payload = await request.json()
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid log settings.") from error
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid log settings.")
+    current = store.log_config(guild_id)
+    current_categories = current.get("categories") if isinstance(current.get("categories"), dict) else {}
+    current_destinations = current.get("category_channels") if isinstance(current.get("category_channels"), dict) else {}
+    raw_categories = payload.get("categories")
+    if raw_categories is None:
+        raw_categories = current_categories
+    if not isinstance(raw_categories, dict):
+        raise HTTPException(status_code=400, detail="Invalid log categories.")
+    categories = {key: bool(raw_categories.get(key, current_categories.get(key, True))) for key in LOG_CATEGORIES}
+    available_channels = {str(channel.get("id")) for channel in store.bot_text_channels(guild_id)}
+    raw_category_channels = payload.get("category_channels")
+    legacy_channel = payload.get("log_channel_id")
+    if raw_category_channels is None:
+        # Accept the previous single-channel payload while clients update.
+        if legacy_channel not in (None, ""):
+            raw_category_channels = {key: legacy_channel for key in LOG_CATEGORIES}
+        else:
+            raw_category_channels = current_destinations
+    if not isinstance(raw_category_channels, dict):
+        raise HTTPException(status_code=400, detail="Invalid log channel settings.")
+    category_channels: dict[str, str | None] = {}
+    for key in LOG_CATEGORIES:
+        value = raw_category_channels.get(key)
+        if value in (None, ""):
+            category_channels[key] = None
+        elif isinstance(value, str) and DISCORD_SNOWFLAKE.fullmatch(value) and value in available_channels:
+            category_channels[key] = value
+        elif isinstance(value, str) and DISCORD_SNOWFLAKE.fullmatch(value):
+            raise HTTPException(status_code=400, detail="Choose a text channel BirdBot can access.")
+        else:
+            raise HTTPException(status_code=400, detail="Choose valid log channels.")
+    if bool(payload.get("enabled", False)):
+        missing = [key for key in LOG_CATEGORIES if categories[key] and not category_channels[key]]
+        if missing:
+            raise HTTPException(status_code=400, detail="Choose a channel for every enabled log type.")
+    config = store.save_log_config(
+        guild_id,
+        bool(payload.get("enabled", False)),
+        None,
+        categories,
+        str(user["id"]),
+        category_channels=category_channels,
+    )
+    return {"log_config": config, "status": "saved"}
 
 
 def spy_game_dashboard_config(guild_id: str | None = None) -> dict[str, object]:
@@ -2342,7 +2423,7 @@ async def queue_dashboard_command(guild_id: str, command_name: str, request: Req
     if channel_id not in {channel["id"] for channel in store.bot_text_channels(guild_id)}:
         raise HTTPException(status_code=404, detail="BirdBot cannot access that text channel.")
     member_id = payload.get("member_id")
-    if command_name in {"profile", "kick", "ban"}:
+    if command_name in {"profile", "kick", "ban", "warning", "show_warning", "timeout"}:
         if not isinstance(member_id, str) or not DISCORD_SNOWFLAKE.fullmatch(member_id):
             raise HTTPException(status_code=400, detail="Choose a valid server member.")
         # Do not reject a valid ID merely because the dashboard's synchronised
@@ -2352,7 +2433,7 @@ async def queue_dashboard_command(guild_id: str, command_name: str, request: Req
     if command_name == "unban":
         if not isinstance(member_id, str) or not DISCORD_SNOWFLAKE.fullmatch(member_id) or member_id not in {ban["user_id"] for ban in store.bot_bans(guild_id)}:
             raise HTTPException(status_code=404, detail="Choose a current ban entry.")
-    if command_name in {"kick", "ban"}:
+    if command_name in {"kick", "ban", "warning", "timeout"}:
         reason = payload.get("reason", "")
         if not isinstance(reason, str) or len(reason) > 512:
             raise HTTPException(status_code=400, detail="The reason must be 512 characters or fewer.")
@@ -2361,6 +2442,27 @@ async def queue_dashboard_command(guild_id: str, command_name: str, request: Req
         if not isinstance(delete_days, int) or not 0 <= delete_days <= 7:
             raise HTTPException(status_code=400, detail="Message deletion days must be between 0 and 7.")
         payload["delete_message_seconds"] = delete_days * 86_400
+    if command_name == "unwarning":
+        warning_id = payload.get("warning_id")
+        if isinstance(warning_id, str) and warning_id.isdigit():
+            warning_id = int(warning_id)
+        if isinstance(warning_id, bool) or not isinstance(warning_id, int) or warning_id < 1:
+            raise HTTPException(status_code=400, detail="Enter a valid warning number.")
+        payload["warning_id"] = warning_id
+    if command_name == "timeout":
+        duration = payload.get("duration_minutes", 10)
+        if isinstance(duration, str) and duration.isdigit():
+            duration = int(duration)
+        if isinstance(duration, bool) or not isinstance(duration, int) or not 1 <= duration <= 40_320:
+            raise HTTPException(status_code=400, detail="Timeout duration must be between 1 minute and 40,320 minutes.")
+        payload["duration_minutes"] = duration
+    if command_name == "delete":
+        amount = payload.get("amount", 10)
+        if isinstance(amount, str) and amount.isdigit():
+            amount = int(amount)
+        if isinstance(amount, bool) or not isinstance(amount, int) or not 1 <= amount <= 100:
+            raise HTTPException(status_code=400, detail="Delete amount must be between 1 and 100 messages.")
+        payload["amount"] = amount
     request_id = store.queue_command(guild_id, channel_id, command_name, user["id"], payload)
     return {"request_id": request_id, "status": "pending"}
 
@@ -2558,15 +2660,80 @@ async def save_dashboard_profile(guild_id: str, request: Request) -> dict[str, o
     }
 
 
+def parse_auto_react_payload(payload: object) -> tuple[str | None, str, str, bool]:
+    """Validate one channel/emoji rule from the Bot Settings panel."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid auto-react settings.")
+    rule_id = payload.get("rule_id")
+    if rule_id in (None, ""):
+        normalized_rule_id = None
+    elif isinstance(rule_id, str) and re.fullmatch(r"[a-fA-F0-9]{32}", rule_id):
+        normalized_rule_id = rule_id
+    else:
+        raise HTTPException(status_code=400, detail="The auto-react rule identifier is invalid.")
+    channel_id = payload.get("channel_id")
+    if not isinstance(channel_id, str) or not DISCORD_SNOWFLAKE.fullmatch(channel_id):
+        raise HTTPException(status_code=400, detail="Choose a valid text channel for the auto-react rule.")
+    emoji = payload.get("emoji")
+    if not isinstance(emoji, str):
+        raise HTTPException(status_code=400, detail="Enter an emoji for the auto-react rule.")
+    emoji = emoji.strip()
+    if not emoji or len(emoji) > 100 or any(character in emoji for character in "\r\n"):
+        raise HTTPException(status_code=400, detail="Use one emoji or custom emoji (up to 100 characters).")
+    enabled = dashboard_bool(payload.get("enabled"), default=True)
+    return normalized_rule_id, channel_id, emoji, enabled
+
+
+@app.get("/api/guilds/{guild_id}/control/bot-settings")
+async def get_dashboard_bot_settings(guild_id: str, request: Request) -> dict[str, object]:
+    await verified_guild_manager(guild_id, request)
+    if not store.is_guild_activated(guild_id):
+        raise HTTPException(status_code=409, detail="Enable BirdBot for this server before managing Bot Settings.")
+    return {"auto_reacts": store.auto_reacts(guild_id)}
+
+
+@app.post("/api/guilds/{guild_id}/control/bot-settings/auto-react")
+async def save_dashboard_auto_react(guild_id: str, request: Request) -> dict[str, object]:
+    user, _ = await verified_guild_manager(guild_id, request)
+    if not store.is_guild_activated(guild_id):
+        raise HTTPException(status_code=409, detail="Enable BirdBot for this server before changing Bot Settings.")
+    try:
+        payload = await request.json()
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid auto-react settings.") from error
+    rule_id, channel_id, emoji, enabled = parse_auto_react_payload(payload)
+    if channel_id not in {str(channel.get("id")) for channel in store.bot_text_channels(guild_id)}:
+        raise HTTPException(status_code=404, detail="BirdBot cannot access that text channel.")
+    if rule_id and not any(str(rule.get("rule_id")) == rule_id for rule in store.auto_reacts(guild_id)):
+        raise HTTPException(status_code=404, detail="That auto-react rule no longer exists.")
+    store.save_auto_react(guild_id, channel_id, emoji, enabled, str(user["id"]), rule_id)
+    return {"auto_reacts": store.auto_reacts(guild_id), "status": "saved"}
+
+
+@app.delete("/api/guilds/{guild_id}/control/bot-settings/auto-react/{rule_id}")
+async def delete_dashboard_auto_react(guild_id: str, rule_id: str, request: Request) -> dict[str, object]:
+    await verified_guild_manager(guild_id, request)
+    if not store.is_guild_activated(guild_id):
+        raise HTTPException(status_code=409, detail="Enable BirdBot for this server before changing Bot Settings.")
+    if not re.fullmatch(r"[a-fA-F0-9]{32}", rule_id):
+        raise HTTPException(status_code=400, detail="The auto-react rule identifier is invalid.")
+    if not store.delete_auto_react(guild_id, rule_id):
+        raise HTTPException(status_code=404, detail="That auto-react rule no longer exists.")
+    return {"auto_reacts": store.auto_reacts(guild_id), "status": "deleted"}
+
+
 @app.post("/api/guilds/{guild_id}/control/dm-message")
 async def queue_dashboard_dm_message(guild_id: str, request: Request) -> dict[str, object]:
-    """Queue a private normal message or embed to one server member."""
+    """Queue a private message to one member or every human server member."""
     user, _ = await verified_guild_manager(guild_id, request)
     if not store.is_guild_activated(guild_id):
         raise HTTPException(status_code=409, detail="Enable BirdBot for this server before sending DMs.")
     payload, upload = await dashboard_multipart_payload(request)
+    recipient_mode = str(payload.get("recipient_mode") or "member").strip().casefold()
+    if recipient_mode not in {"member", "everyone"}:
+        raise HTTPException(status_code=400, detail="Choose one member or everyone in the server.")
     member_id = payload.get("member_id")
-    if not isinstance(member_id, str) or not DISCORD_SNOWFLAKE.fullmatch(member_id):
+    if recipient_mode == "member" and (not isinstance(member_id, str) or not DISCORD_SNOWFLAKE.fullmatch(member_id)):
         raise HTTPException(status_code=400, detail="Choose a valid server member.")
     raw_mentions = payload.get("mention_user_ids", [])
     if raw_mentions is None:
@@ -2582,7 +2749,12 @@ async def queue_dashboard_dm_message(guild_id: str, request: Request) -> dict[st
     message_type = str(payload.get("message_type") or "normal").strip().casefold()
     if message_type not in {"normal", "embed"}:
         raise HTTPException(status_code=400, detail="Choose either a normal message or an embed message.")
-    normalized: dict[str, object] = {"member_id": member_id, "message_type": message_type, "mention_user_ids": mentions}
+    normalized: dict[str, object] = {
+        "recipient_mode": recipient_mode,
+        "member_id": member_id if recipient_mode == "member" else None,
+        "message_type": message_type,
+        "mention_user_ids": mentions,
+    }
     if message_type == "normal":
         content = payload.get("content")
         if not isinstance(content, str) or not content.strip():
@@ -2613,7 +2785,7 @@ async def queue_dashboard_dm_message(guild_id: str, request: Request) -> dict[st
     return {"request_id": request_id, "status": "pending"}
 
 
-def parse_role_payload(payload: object, *, require_both: bool = True) -> dict[str, str]:
+def parse_role_payload(payload: object, *, require_both: bool = True) -> dict[str, object]:
     """Validate the small role payload shared by create and edit routes."""
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Invalid role data.")
@@ -2637,7 +2809,19 @@ def parse_role_payload(payload: object, *, require_both: bool = True) -> dict[st
             color = f"#{color}"
     else:
         color = ""
-    return {"name": name, "color": color}
+    normalized: dict[str, object] = {"name": name, "color": color}
+    if "permissions" in payload:
+        raw_permissions = payload.get("permissions")
+        if not isinstance(raw_permissions, dict):
+            raise HTTPException(status_code=400, detail="Role permissions must be an object.")
+        unknown = sorted(set(raw_permissions) - set(ROLE_PERMISSION_KEYS))
+        if unknown:
+            raise HTTPException(status_code=400, detail="The role permissions contain an unknown option.")
+        normalized["permissions"] = {
+            key: bool(raw_permissions.get(key, False))
+            for key in ROLE_PERMISSION_KEYS
+        }
+    return normalized
 
 
 @app.post("/api/guilds/{guild_id}/control/roles")
@@ -2660,7 +2844,7 @@ async def create_dashboard_role(guild_id: str, request: Request) -> dict[str, st
 
 @app.patch("/api/guilds/{guild_id}/control/roles/{role_id}")
 async def edit_dashboard_role(guild_id: str, role_id: str, request: Request) -> dict[str, str]:
-    """Queue a role rename/color update for the selected guild role."""
+    """Queue a role name, color, and optional permissions update."""
     user, _ = await verified_guild_manager(guild_id, request)
     if not store.is_guild_activated(guild_id):
         raise HTTPException(status_code=409, detail="Enable BirdBot for this server before managing roles.")
@@ -2701,7 +2885,7 @@ async def delete_dashboard_role(guild_id: str, role_id: str, request: Request) -
 
 @app.post("/api/guilds/{guild_id}/commands/{command_name}")
 async def queue_command_endpoint(guild_id: str, command_name: str, request: Request) -> dict[str, str]:
-    if command_name not in {"ping", "server", "profile", "kick", "ban", "unban"}:
+    if command_name not in set(DASHBOARD_COMMAND_NAMES) | {"unban"}:
         raise HTTPException(status_code=404, detail="That command is not available.")
     return await queue_dashboard_command(guild_id, command_name, request)
 

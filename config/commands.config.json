@@ -1,5 +1,5 @@
 {
-  "_instructions": "Edit the en/ar text below to change command replies. Supported placeholders: {name}, {member}, {level}, {requested_by}.",
+  "_instructions": "Edit the en/ar text below to change command replies. Supported placeholders include {name}, {member}, {level}, {requested_by}, {number}, {reason}, {server}, {count}, {date}, and {moderator}.",
   "common": {
     "en": {
       "disabled": "This command is disabled for this server. Enable it from the website Commands tab.",
@@ -82,30 +82,164 @@
   },
   "kick": {
     "en": {
-      "success": "{member} has been Kicked from the server",
+      "success": "Kicked {member}\n\n> Reason: {reason}",
       "permission": "You need Kick Members permission.",
       "dashboard_permission": "BirdBot needs the Kick Members permission.",
-      "missing_member": "Choose a member first."
+      "missing_member": "Choose a member first.",
+      "no_reason": "No reason provided."
     },
     "ar": {
-      "success": "تم طرد {member} من السيرفر",
+      "success": "طرد {member}\n\n> السبب: {reason}",
       "permission": "تحتاج إلى صلاحية طرد الأعضاء.",
       "dashboard_permission": "يحتاج BirdBot إلى صلاحية طرد الأعضاء.",
-      "missing_member": "اختر عضواً أولاً."
+      "missing_member": "اختر عضواً أولاً.",
+      "no_reason": "لم يتم تقديم سبب."
     }
   },
   "ban": {
     "en": {
-      "success": "{member} has been Banned from the server",
+      "success": "Banned {member}\n\n> Reason: {reason}",
       "permission": "You need Ban Members permission.",
       "dashboard_permission": "BirdBot needs the Ban Members permission.",
+      "missing_member": "Choose a member first.",
+      "no_reason": "No reason provided."
+    },
+    "ar": {
+      "success": "حظر {member}\n\n> السبب: {reason}",
+      "permission": "تحتاج إلى صلاحية حظر الأعضاء.",
+      "dashboard_permission": "يحتاج BirdBot إلى صلاحية حظر الأعضاء.",
+      "missing_member": "اختر عضواً أولاً.",
+      "no_reason": "لم يتم تقديم سبب."
+    }
+  },
+  "warning": {
+    "en": {
+      "success": "Warning {member}\n\n> Reason: {reason}\n> Warning number: #{number}",
+      "dm": "You have received a warning.\n\n> Warning number: #{number}\n> Server: {server}\n> Reason: {reason}",
+      "permission": "You need the Moderate Members permission to manage warnings.",
+      "missing_member": "Choose a member first.",
+      "missing_reason": "Provide a reason for the warning.",
+      "no_reason": "No reason provided.",
+      "dashboard_permission": "BirdBot needs the Moderate Members permission to manage warnings.",
+      "dm_failed": " The warning was saved, but I could not send the member a DM."
+    },
+    "ar": {
+      "success": "تحذير {member}\n\n> السبب: {reason}\n> رقم التحذير: #{number}",
+      "dm": "لقد تلقيت تحذيرًا.\n\n> رقم التحذير: #{number}\n> الخادم: {server}\n> السبب: {reason}",
+      "permission": "تحتاج إلى صلاحية إدارة الأعضاء لإدارة التحذيرات.",
+      "missing_member": "اختر عضواً أولاً.",
+      "missing_reason": "اكتب سبب التحذير.",
+      "no_reason": "لا يوجد سبب محدد.",
+      "dashboard_permission": "يحتاج BirdBot إلى صلاحية إدارة الأعضاء لإدارة التحذيرات.",
+      "dm_failed": " تم حفظ التحذير، لكن تعذر إرسال رسالة خاصة للعضو."
+    }
+  },
+  "unwarning": {
+    "en": {
+      "success": "Warning #{number} for {member} was removed.",
+      "not_found": "No active warning with number #{number} was found in this server.",
+      "permission": "You need the Moderate Members permission to manage warnings.",
+      "missing_number": "Enter the warning number to remove.",
+      "invalid_number": "Enter a valid warning number.",
+      "dashboard_permission": "BirdBot needs the Moderate Members permission to manage warnings."
+    },
+    "ar": {
+      "success": "تمت إزالة التحذير رقم #{number} عن {member}.",
+      "not_found": "لم يتم العثور على تحذير نشط بالرقم #{number} في هذا الخادم.",
+      "permission": "تحتاج إلى صلاحية إدارة الأعضاء لإدارة التحذيرات.",
+      "missing_number": "اكتب رقم التحذير الذي تريد إزالته.",
+      "invalid_number": "اكتب رقم تحذير صحيحاً.",
+      "dashboard_permission": "يحتاج BirdBot إلى صلاحية إدارة الأعضاء لإدارة التحذيرات."
+    }
+  },
+  "show_warning": {
+    "en": {
+      "title": "Warnings for {member}",
+      "count": "Active warnings: {count}",
+      "none": "{member} has no active warnings.",
+      "entry": "Warning #{number} • {date}\nModerator: {moderator}\nReason: {reason}",
+      "permission": "You need the Moderate Members permission to view warnings.",
       "missing_member": "Choose a member first."
     },
     "ar": {
-      "success": "تم حظر {member} من السيرفر",
-      "permission": "تحتاج إلى صلاحية حظر الأعضاء.",
-      "dashboard_permission": "يحتاج BirdBot إلى صلاحية حظر الأعضاء.",
+      "title": "تحذيرات {member}",
+      "count": "التحذيرات النشطة: {count}",
+      "none": "لا توجد تحذيرات نشطة على {member}.",
+      "entry": "التحذير #{number} • {date}\nالمشرف: {moderator}\nالسبب: {reason}",
+      "permission": "تحتاج إلى صلاحية إدارة الأعضاء لعرض التحذيرات.",
       "missing_member": "اختر عضواً أولاً."
+    }
+  },
+  "timeout": {
+    "en": {
+      "success": "Timed out {member}\n\n> Duration: {duration} minute(s)\n> Reason: {reason}",
+      "permission": "You need the Moderate Members permission to use timeout.",
+      "dashboard_permission": "BirdBot needs the Moderate Members permission to apply timeouts.",
+      "missing_member": "Choose a member first.",
+      "missing_duration": "Enter the timeout duration in minutes.",
+      "invalid_member": "Choose a valid member.",
+      "invalid_duration": "Duration must be between 1 minute and 28 days (40,320 minutes).",
+      "no_reason": "No reason provided."
+    },
+    "ar": {
+      "success": "إسكات مؤقت {member}\n\n> المدة: {duration} دقيقة\n> السبب: {reason}",
+      "permission": "تحتاج إلى صلاحية إدارة الأعضاء لاستخدام الإسكات المؤقت.",
+      "dashboard_permission": "يحتاج BirdBot إلى صلاحية إدارة الأعضاء لتطبيق الإسكات المؤقت.",
+      "missing_member": "اختر عضواً أولاً.",
+      "missing_duration": "اكتب مدة الإسكات بالدقائق.",
+      "invalid_member": "اختر عضواً صحيحاً.",
+      "invalid_duration": "يجب أن تكون المدة بين دقيقة واحدة و28 يوماً (40320 دقيقة).",
+      "no_reason": "لم يتم تقديم سبب."
+    }
+  },
+  "lock": {
+    "en": {
+      "success": "This channel is now locked.",
+      "permission": "You need the Manage Channels permission to lock a channel.",
+      "dashboard_permission": "BirdBot needs Manage Channels permission to lock this channel.",
+      "invalid_channel": "This command can only be used in a text channel."
+    },
+    "ar": {
+      "success": "تم قفل هذه القناة.",
+      "permission": "تحتاج إلى صلاحية إدارة القنوات لقفل القناة.",
+      "dashboard_permission": "يحتاج BirdBot إلى صلاحية إدارة القنوات لقفل هذه القناة.",
+      "invalid_channel": "يمكن استخدام هذا الأمر في قناة نصية فقط."
+    }
+  },
+  "unlock": {
+    "en": {
+      "success": "This channel is now unlocked.",
+      "permission": "You need the Manage Channels permission to unlock a channel.",
+      "dashboard_permission": "BirdBot needs Manage Channels permission to unlock this channel.",
+      "invalid_channel": "This command can only be used in a text channel."
+    },
+    "ar": {
+      "success": "تم فتح هذه القناة.",
+      "permission": "تحتاج إلى صلاحية إدارة القنوات لفتح القناة.",
+      "dashboard_permission": "يحتاج BirdBot إلى صلاحية إدارة القنوات لفتح هذه القناة.",
+      "invalid_channel": "يمكن استخدام هذا الأمر في قناة نصية فقط."
+    }
+  },
+  "delete": {
+    "en": {
+      "success": "Deleted {count} message(s).",
+      "permission": "You need the Manage Messages permission to delete messages.",
+      "dashboard_permission": "BirdBot needs Manage Messages permission to delete messages.",
+      "history_permission": "BirdBot needs Read Message History permission to delete messages.",
+      "invalid_channel": "This command can only be used in a text channel.",
+      "missing_amount": "Enter how many messages to delete.",
+      "invalid_amount": "The amount must be between 1 and 100 messages.",
+      "failed": "Discord could not delete those messages. Please try again."
+    },
+    "ar": {
+      "success": "تم حذف {count} رسالة.",
+      "permission": "تحتاج إلى صلاحية إدارة الرسائل لحذف الرسائل.",
+      "dashboard_permission": "يحتاج BirdBot إلى صلاحية إدارة الرسائل لحذف الرسائل.",
+      "history_permission": "يحتاج BirdBot إلى صلاحية قراءة سجل الرسائل لحذف الرسائل.",
+      "invalid_channel": "يمكن استخدام هذا الأمر في قناة نصية فقط.",
+      "missing_amount": "اكتب عدد الرسائل التي تريد حذفها.",
+      "invalid_amount": "يجب أن يكون العدد بين 1 و100 رسالة.",
+      "failed": "تعذر على Discord حذف هذه الرسائل. حاول مرة أخرى."
     }
   },
   "unban": {

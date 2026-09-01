@@ -106,9 +106,9 @@ class EyooBot(commands.Bot):
     def get_dynamic_prefix(_: commands.Bot, message: discord.Message) -> str:
         """Return the prefix configured for the message's server.
 
-        A non-printing sentinel is used while prefix commands are disabled so
-        Discord.py still receives a valid prefix callable but no user message
-        can accidentally invoke a command.
+        A non-printing sentinel is used while prefixed commands are disabled
+        so Discord.py still receives a valid prefix callable. Configured
+        shortcuts are dispatched separately and can remain standalone.
         """
         if not message.guild:
             return COMMAND_PREFIX
@@ -124,18 +124,43 @@ class EyooBot(commands.Bot):
             return
         settings = store.command_settings(str(message.guild.id))
         prefix = str(settings.get("prefix") or COMMAND_PREFIX)
-        if settings.get("prefix_enabled", True) and message.content.startswith(prefix):
-            remainder = message.content[len(prefix):]
-            shortcut, separator, arguments = remainder.partition(" ")
+        content = str(message.content or "")
+        # A shortcut is an alias, not another prefixed command: accept it both
+        # as ``!alias`` and as a standalone ``alias``.  Splitting on any
+        # whitespace also keeps aliases usable when users paste tabs or line
+        # breaks after them.
+        candidates = []
+        if settings.get("prefix_enabled", True) and content.startswith(prefix):
+            candidates.append(content[len(prefix):])
+        # Keep the full content as a fallback for prefixes that are also valid
+        # username/shortcut text (for example prefix ``p`` and shortcut
+        # ``pong``). Standalone aliases remain available even when prefixed
+        # commands have been switched off.
+        if content not in candidates:
+            candidates.append(content)
+        for remainder in candidates:
+            shortcut_parts = remainder.split(None, 1)
+            shortcut = shortcut_parts[0] if shortcut_parts else ""
+            arguments = shortcut_parts[1] if len(shortcut_parts) > 1 else ""
             config = store.command_for_shortcut(str(message.guild.id), shortcut)
-            if config and config.get("enabled"):
-                command_name = str(config.get("command_name") or "")
-                command = self.get_command(command_name)
-                if command:
-                    proxy = copy.copy(message)
-                    proxy.content = f"{prefix}{command_name}{(' ' + arguments) if separator else ''}"
-                    await self.process_commands(proxy)
-                    return
+            if not (config and config.get("enabled")):
+                continue
+            command_name = str(config.get("command_name") or "")
+            # Dashboard settings use an underscore-safe key for the nested
+            # ``show warning`` command. Discord.py resolves the actual prefix
+            # command by its space-separated qualified name.
+            dispatched_name = "show warning" if command_name == "show_warning" else command_name
+            command = self.get_command(dispatched_name) or self.get_command(command_name)
+            if command:
+                proxy = copy.copy(message)
+                # Use the same non-printing sentinel as the dynamic prefix
+                # when the manager disabled prefixed commands. This keeps a
+                # standalone shortcut usable without adding custom attributes
+                # to Discord's slotted Message object.
+                dispatch_prefix = prefix if settings.get("prefix_enabled", True) else "\x00"
+                proxy.content = f"{dispatch_prefix}{dispatched_name}{(' ' + arguments) if arguments else ''}"
+                await self.process_commands(proxy)
+                return
         await self.process_commands(message)
 
     async def setup_hook(self) -> None:
@@ -214,7 +239,9 @@ class EyooBot(commands.Bot):
     async def on_command_error(self, ctx: commands.Context[commands.Bot], error: commands.CommandError) -> None:
         if isinstance(error, commands.CommandNotFound):
             return
-        command_name = str(ctx.command.qualified_name if ctx.command else "").split(" ", 1)[0]
+        command_name = str(ctx.command.qualified_name if ctx.command else "").replace(" ", "_")
+        if command_name == "show_warnings":
+            command_name = "show_warning"
         arabic = bool(ctx.guild and store.command_config(str(ctx.guild.id), command_name).get("language") == "ar") if command_name else False
         if isinstance(error, commands.CheckFailure):
             if ctx.guild and command_name in DASHBOARD_COMMAND_NAMES and not store.command_config(str(ctx.guild.id), command_name).get("enabled", True):
@@ -229,7 +256,9 @@ class EyooBot(commands.Bot):
         await ctx.send(command_message("common", "ar" if arabic else "en", "failed"))
 
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
-        command_name = str(getattr(interaction.command, "name", ""))
+        command_name = str(getattr(interaction.command, "qualified_name", "") or getattr(interaction.command, "name", "")).replace(" ", "_")
+        if command_name == "show_warnings":
+            command_name = "show_warning"
         arabic = bool(interaction.guild and store.command_config(str(interaction.guild.id), command_name).get("language") == "ar") if command_name else False
         if isinstance(error, app_commands.CommandOnCooldown):
             message = command_message("common", "ar" if arabic else "en", "cooldown")
@@ -276,6 +305,7 @@ class EyooBot(commands.Bot):
         """Execute validated website requests using this one global Discord client."""
         for request in store.claim_pending_commands():
             try:
+                command_result: object | None = None
                 if not store.is_guild_activated(request["guild_id"]):
                     raise ValueError("This server no longer has the command available.")
                 guild = self.get_guild(int(request["guild_id"]))
@@ -324,8 +354,8 @@ class EyooBot(commands.Bot):
                     general = self.get_cog("General")
                     if general is None:
                         raise ValueError("The Control Panel is not ready yet. Please try again.")
-                    await general.run_dashboard_dm_message(guild, request.get("payload") or {})
-                elif command_name in {"role_create", "role_edit", "role_delete"}:
+                    command_result = await general.run_dashboard_dm_message(guild, request.get("payload") or {})
+                elif command_name in {"role_create", "role_edit", "role_delete", "role_permissions"}:
                     general = self.get_cog("General")
                     if general is None:
                         raise ValueError("The Control Panel is not ready yet. Please try again.")
@@ -340,7 +370,7 @@ class EyooBot(commands.Bot):
                     await general.run_dashboard_command(
                         guild, channel, command_name, request["requested_by"], request["payload"]
                     )
-                store.complete_command(request["request_id"])
+                store.complete_command(request["request_id"], result=command_result)
             except discord.Forbidden as error:
                 if getattr(error, "code", None) == 50001:
                     store.complete_command(request["request_id"], "BirdBot cannot access the selected channel. Grant View Channel and Send Messages permissions, then try again.")

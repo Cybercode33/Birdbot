@@ -4,6 +4,8 @@
   "activities": [
     {"type": "playing", "name": "with !ping"},
     {"type": "watching", "name": "over this server"},
-    {"type": "listening", "name": "your ideas"}
+    {"type": "listening", "name": "your ideas"},
+    {"type": "playing", "name": "عم العالم"},
+    {"type": "playing", "name": "افجر بوت في منطقتك"}
   ]
 }

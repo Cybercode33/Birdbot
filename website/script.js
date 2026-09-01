@@ -55,6 +55,9 @@ let ticketLogsRefreshInFlight = false;
 let ticketLogsQuery = "";
 let ticketListSnapshot = null;
 let ticketLogsSnapshot = null;
+let guildLogsRefreshInFlight = false;
+let guildLogsQuery = "";
+let guildLogsSnapshot = null;
 let ticketServerClockOffsetMs = 0;
 // Responses fetched by the readiness gate are reused by the first render so
 // navigation never performs the same Discord/Spotify request twice.
@@ -491,19 +494,21 @@ function renderControlPanel() {
 
   const channels = Array.isArray(managementData?.channels) ? managementData.channels.length : 0;
   const roles = Array.isArray(managementData?.roles) ? managementData.roles.length : 0;
+  const autoReactRules = Array.isArray(managementData?.auto_reacts) ? managementData.auto_reacts.length : 0;
   const cards = [
     ["Server message", "Configure automated server announcements."],
     ["Roles", `${roles.toLocaleString()} roles available to manage.`],
     ["Channels", `${channels.toLocaleString()} channels available to manage.`],
     ["VC", "Manage voice-channel and connection settings."],
     ["DM's Messages", "Configure private messages sent by BirdBot."],
+    ["Bot Settings", `${autoReactRules.toLocaleString()} auto-react rule${autoReactRules === 1 ? "" : "s"} configured.`],
     ["Bot profile", "Customize BirdBot's profile and presence."],
   ];
 
   cards.forEach(([title, description], index) => {
     const card = document.createElement("article");
     card.className = "control-panel-card";
-    const isReady = [0, 1, 4, 5].includes(index);
+    const isReady = [0, 1, 4, 5, 6].includes(index);
     if (isReady) {
       card.classList.add("control-panel-card-action");
       card.tabIndex = 0;
@@ -513,6 +518,7 @@ function renderControlPanel() {
         if (index === 0) return renderServerMessagePanel();
         if (index === 1) return renderRolesPanel();
         if (index === 4) return renderDMMessagePanel();
+        if (index === 5) return renderBotSettingsPanel();
         return renderBotProfilePanel();
       };
       card.addEventListener("click", open);
@@ -526,19 +532,19 @@ function renderControlPanel() {
     card.append(
       textElement("h3", "control-panel-card-title", title),
       textElement("p", "control-panel-card-copy", description),
-      textElement("span", "control-panel-card-status", index === 0 ? "Open composer" : index === 1 ? "Manage roles" : index === 4 ? "Open composer" : "Edit profile"),
+      textElement("span", "control-panel-card-status", index === 0 ? "Open composer" : index === 1 ? "Manage roles" : index === 4 ? "Open composer" : index === 5 ? "Configure rules" : "Edit profile"),
     );
     grid.append(card);
   });
   commandGrid.append(grid);
 }
 
-async function waitForDashboardCommand(requestId) {
+async function waitForDashboardCommand(requestId, attempts = 40) {
   const id = String(requestId || "");
   if (!id) throw new Error("BirdBot did not return a command request ID.");
   // The bot worker checks its queue continuously. A short poll keeps the
   // dashboard responsive without making the browser wait for a fixed delay.
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     await waitFor(250);
     const state = await requestJson(`/api/command-requests/${encodeURIComponent(id)}`, { cache: "no-store" });
     if (state.status === "complete") return state;
@@ -749,7 +755,7 @@ function renderServerMessagePanel() {
       });
       commandFeedback.hidden = false;
       commandFeedback.textContent = "BirdBot is sending your message...";
-      const state = await waitForDashboardCommand(queued.request_id);
+      const state = await waitForDashboardCommand(queued.request_id, recipientMode === "everyone" ? 240 : 40);
       commandFeedback.textContent = state.status === "pending"
         ? "The message is queued and will appear in the selected channel shortly."
         : "Message sent successfully.";
@@ -925,13 +931,17 @@ function renderDMMessagePanel() {
   heading.className = "server-message-heading";
   heading.append(
     textElement("h3", "server-message-title", "DM’s messages"),
-    textElement("p", "server-message-copy", "Send one private message to a server member. Mentions and one image or video attachment are supported."),
+    textElement("p", "server-message-copy", "Send a private message to one member or every human member in the server. Mentions and one image or video attachment are supported."),
   );
   const form = document.createElement("form");
   form.className = "server-message-form dm-message-form";
   form.noValidate = true;
+  const recipientModeSelect = document.createElement("select");
+  recipientModeSelect.className = "channel-select";
+  recipientModeSelect.append(new Option("One server member", "member"), new Option("Everyone in the server", "everyone"));
   const targetPicker = createMemberSelect();
   wireMemberPickerSearch(targetPicker);
+  const targetField = labeledControl("Send to", targetPicker.element);
   const mentionPicker = createMemberSelect();
   wireMemberPickerSearch(mentionPicker);
   const mentionIds = new Set();
@@ -1022,9 +1032,19 @@ function renderDMMessagePanel() {
   back.addEventListener("click", () => renderControlPanel());
   const send = textElement("button", "primary-button", "Send private message");
   send.type = "submit";
+  const syncRecipientMode = () => {
+    const everyone = recipientModeSelect.value === "everyone";
+    targetField.hidden = everyone;
+    send.textContent = everyone ? "Send to everyone" : "Send private message";
+    attachmentHint.textContent = everyone
+      ? "Optional image or MP4/WebM/MOV video Â· max 8 MB Â· broadcast delivery is rate-limited by Discord"
+      : "Optional image or MP4/WebM/MOV video Â· max 8 MB";
+  };
+  recipientModeSelect.addEventListener("change", syncRecipientMode);
   actions.append(back, send);
   form.append(
-    labeledControl("Send to server member", targetPicker.element),
+    labeledControl("Recipients", recipientModeSelect),
+    targetField,
     labeledControl("Message style", typeSelect),
     normalField,
     embedFields,
@@ -1037,14 +1057,18 @@ function renderDMMessagePanel() {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (send.disabled) return;
+    const recipientMode = recipientModeSelect.value === "everyone" ? "everyone" : "member";
     const memberId = targetPicker.select.value;
     const messageType = typeSelect.value === "embed" ? "embed" : "normal";
     const content = normalInput.value.trim();
     const title = titleInput.value.trim();
     const description = descriptionInput.value.trim();
-    if (!memberId) {
+    if (recipientMode === "member" && !memberId) {
       commandFeedback.hidden = false;
       commandFeedback.textContent = "Choose a server member first.";
+      return;
+    }
+    if (recipientMode === "everyone" && !window.confirm("Send this private message to every human member in the server? Discord may rate-limit a large broadcast.")) {
       return;
     }
     if (messageType === "normal" && !content) {
@@ -1069,7 +1093,7 @@ function renderDMMessagePanel() {
     back.disabled = true;
     beginLoading("Sending the private message through BirdBot...");
     try {
-      const payload = { member_id: memberId, message_type: messageType, mention_user_ids: [...mentionIds] };
+      const payload = { recipient_mode: recipientMode, member_id: recipientMode === "member" ? memberId : null, message_type: messageType, mention_user_ids: [...mentionIds] };
       if (messageType === "normal") payload.content = content;
       else { payload.title = title; payload.description = description; }
       const formData = new FormData();
@@ -1082,15 +1106,20 @@ function renderDMMessagePanel() {
       commandFeedback.hidden = false;
       commandFeedback.textContent = "BirdBot is sending the private message...";
       const state = await waitForDashboardCommand(queued.request_id);
-      commandFeedback.textContent = state.status === "pending"
-        ? "The private message is still queued. Check again shortly."
-        : "Private message sent successfully.";
+      const result = state.result && typeof state.result === "object" ? state.result : {};
+      commandFeedback.textContent = recipientMode === "everyone" && state.status === "complete"
+        ? `Broadcast complete: ${Number(result.delivered || 0)} delivered, ${Number(result.failed || 0)} failed${Number(result.skipped_bots || 0) ? `, ${Number(result.skipped_bots)} bot accounts skipped` : ""}.`
+        : state.status === "pending"
+          ? "The private message is still queued. Check again shortly."
+          : "Private message sent successfully.";
       if (state.status === "complete") {
         normalInput.value = "";
         titleInput.value = "";
         descriptionInput.value = "";
         attachmentInput.value = "";
-        attachmentHint.textContent = "Optional image or MP4/WebM/MOV video · max 8 MB";
+        attachmentHint.textContent = recipientMode === "everyone"
+          ? "Optional image or MP4/WebM/MOV video · max 8 MB · broadcast delivery is rate-limited by Discord"
+          : "Optional image or MP4/WebM/MOV video · max 8 MB";
         syncPreview();
       }
     } catch (error) {
@@ -1105,6 +1134,177 @@ function renderDMMessagePanel() {
   panel.append(heading, form);
   commandGrid.append(panel);
   syncPreview();
+  syncRecipientMode();
+}
+
+function renderBotSettingsPanel() {
+  commandGrid.replaceChildren();
+  commandFeedback.hidden = true;
+  const panel = document.createElement("section");
+  panel.className = "server-message-panel bot-settings-panel";
+  panel.setAttribute("aria-labelledby", "bot-settings-title");
+  const heading = document.createElement("div");
+  heading.className = "server-message-heading";
+  heading.append(
+    textElement("h3", "server-message-title", "Bot Settings"),
+    textElement("p", "server-message-copy", "Configure automatic reactions. Each rule watches one channel and can use a Unicode or custom Discord emoji."),
+  );
+  const form = document.createElement("form");
+  form.className = "server-message-form auto-react-form";
+  form.noValidate = true;
+  const channelSelect = createChannelSelect();
+  const emojiInput = document.createElement("input");
+  emojiInput.className = "channel-select auto-react-emoji";
+  emojiInput.type = "text";
+  emojiInput.maxLength = 100;
+  emojiInput.placeholder = "e.g. \u{1F44D} or <:custom:123456789012345678>";
+  const enabledLabel = document.createElement("label");
+  enabledLabel.className = "command-inline-toggle auto-react-enabled";
+  const enabledInput = document.createElement("input");
+  enabledInput.type = "checkbox";
+  enabledInput.checked = true;
+  enabledLabel.append(enabledInput, textElement("span", "", "Enable this rule"));
+  const editing = { ruleId: null };
+  const save = textElement("button", "primary-button", "Add auto-react");
+  save.type = "submit";
+  const cancel = textElement("button", "secondary-button", "Cancel edit");
+  cancel.type = "button";
+  cancel.hidden = true;
+  const formStatus = textElement("span", "command-settings-status", "");
+  const resetForm = () => {
+    editing.ruleId = null;
+    channelSelect.value = "";
+    emojiInput.value = "";
+    enabledInput.checked = true;
+    save.textContent = "Add auto-react";
+    cancel.hidden = true;
+    formStatus.textContent = "";
+  };
+  cancel.addEventListener("click", resetForm);
+  form.append(
+    labeledControl("Room / channel", channelSelect),
+    labeledControl("Reaction emoji", emojiInput),
+    enabledLabel,
+    textElement("span", "server-message-hint", "When a member posts in the selected channel, BirdBot adds this reaction. Multiple rules can use different channels."),
+    document.createElement("div"),
+  );
+  const formActions = form.lastElementChild;
+  formActions.className = "server-message-actions";
+  formActions.append(cancel, save, formStatus);
+
+  const rulesSection = document.createElement("section");
+  rulesSection.className = "auto-react-rules";
+  const rulesHeader = document.createElement("div");
+  rulesHeader.className = "auto-react-rules-header";
+  const rulesTitle = textElement("strong", "", "Auto-react rules");
+  const rulesCount = textElement("span", "auto-react-count", "0 rules");
+  rulesHeader.append(rulesTitle, rulesCount);
+  const rulesList = document.createElement("div");
+  rulesList.className = "auto-react-list";
+  rulesSection.append(rulesHeader, rulesList);
+  const back = textElement("button", "secondary-button", "Back to Control Panel");
+  back.type = "button";
+  back.addEventListener("click", () => renderControlPanel());
+
+  const channelName = (channelId) => {
+    const channel = (managementData.channels || []).find((item) => String(item.id) === String(channelId));
+    return channel ? `#${channel.name}` : `#${channelId}`;
+  };
+  const renderRules = () => {
+    const rules = Array.isArray(managementData.auto_reacts) ? managementData.auto_reacts : [];
+    rulesCount.textContent = `${rules.length} rule${rules.length === 1 ? "" : "s"}`;
+    rulesList.replaceChildren();
+    if (!rules.length) {
+      rulesList.append(textElement("p", "empty-state", "No auto-react rules have been created yet."));
+      return;
+    }
+    rules.forEach((rule) => {
+      const row = document.createElement("article");
+      row.className = "auto-react-row";
+      const details = document.createElement("div");
+      details.className = "auto-react-row-details";
+      details.append(
+        textElement("strong", "", `${channelName(rule.channel_id)}  ${rule.emoji || ""}`),
+        textElement("small", "", rule.enabled === false ? "Disabled" : "Enabled"),
+      );
+      const actions = document.createElement("div");
+      actions.className = "auto-react-row-actions";
+      const edit = textElement("button", "secondary-button", "Edit");
+      edit.type = "button";
+      edit.addEventListener("click", () => {
+        editing.ruleId = String(rule.rule_id);
+        channelSelect.value = String(rule.channel_id || "");
+        emojiInput.value = String(rule.emoji || "");
+        enabledInput.checked = rule.enabled !== false;
+        save.textContent = "Save auto-react";
+        cancel.hidden = false;
+        emojiInput.focus();
+      });
+      const remove = textElement("button", "danger-button", "Delete");
+      remove.type = "button";
+      remove.addEventListener("click", async () => {
+        if (remove.disabled || !window.confirm(`Delete the auto-react rule for ${channelName(rule.channel_id)}?`)) return;
+        remove.disabled = true;
+        try {
+          const result = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/control/bot-settings/auto-react/${encodeURIComponent(rule.rule_id)}`, { method: "DELETE" });
+          managementData.auto_reacts = result.auto_reacts || [];
+          if (editing.ruleId === String(rule.rule_id)) resetForm();
+          renderRules();
+          commandFeedback.hidden = false;
+          commandFeedback.textContent = "Auto-react rule deleted.";
+        } catch (error) {
+          commandFeedback.hidden = false;
+          commandFeedback.textContent = errorMessage(error, "The auto-react rule could not be deleted.");
+          remove.disabled = false;
+        }
+      });
+      actions.append(edit, remove);
+      row.append(details, actions);
+      rulesList.append(row);
+    });
+  };
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (save.disabled) return;
+    if (!channelSelect.value) {
+      formStatus.textContent = "Choose a channel first.";
+      formStatus.className = "command-settings-status is-error";
+      return;
+    }
+    if (!emojiInput.value.trim()) {
+      formStatus.textContent = "Enter an emoji first.";
+      formStatus.className = "command-settings-status is-error";
+      emojiInput.focus();
+      return;
+    }
+    save.disabled = true;
+    formStatus.textContent = "Saving...";
+    formStatus.className = "command-settings-status is-loading";
+    try {
+      const payload = { channel_id: channelSelect.value, emoji: emojiInput.value.trim(), enabled: enabledInput.checked };
+      if (editing.ruleId) payload.rule_id = editing.ruleId;
+      const result = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/control/bot-settings/auto-react`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      managementData.auto_reacts = result.auto_reacts || [];
+      formStatus.textContent = "Saved.";
+      formStatus.className = "command-settings-status is-success";
+      commandFeedback.hidden = false;
+      commandFeedback.textContent = "Auto-react settings saved and applied.";
+      resetForm();
+      renderRules();
+    } catch (error) {
+      formStatus.textContent = errorMessage(error, "The auto-react rule could not be saved.");
+      formStatus.className = "command-settings-status is-error";
+    } finally {
+      save.disabled = false;
+    }
+  });
+  panel.append(heading, form, rulesSection, back);
+  commandGrid.append(panel);
+  renderRules();
 }
 
 function normalizedRoleColor(value) {
@@ -1114,7 +1314,58 @@ function normalizedRoleColor(value) {
 
 async function reloadManagementRoles() {
   const fresh = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/manage`, { cache: "no-store" });
-  managementData = { ...managementData, roles: Array.isArray(fresh.roles) ? fresh.roles : [] };
+  managementData = {
+    ...managementData,
+    roles: Array.isArray(fresh.roles) ? fresh.roles : [],
+    role_permission_fields: Array.isArray(fresh.role_permission_fields)
+      ? fresh.role_permission_fields
+      : managementData.role_permission_fields,
+  };
+}
+
+const DEFAULT_ROLE_PERMISSION_FIELDS = [
+  ["view_channel", "View Channels", "See text, voice, and stage channels."],
+  ["send_messages", "Send Messages", "Send messages in text channels."],
+  ["embed_links", "Embed Links", "Show rich previews for links."],
+  ["attach_files", "Attach Files", "Upload images and other files."],
+  ["read_message_history", "Read Message History", "Read earlier messages."],
+  ["add_reactions", "Add Reactions", "Add reactions to messages."],
+  ["use_external_emojis", "Use External Emojis", "Use emojis from other servers."],
+  ["send_messages_in_threads", "Send Messages in Threads", "Reply in threads."],
+  ["create_public_threads", "Create Public Threads", "Start public threads."],
+  ["create_private_threads", "Create Private Threads", "Start private threads."],
+  ["manage_threads", "Manage Threads", "Rename, archive, or delete threads."],
+  ["mention_everyone", "Mention Everyone", "Use @everyone and @here mentions."],
+  ["manage_messages", "Manage Messages", "Delete or pin other members' messages."],
+  ["manage_channels", "Manage Channels", "Create and edit channels."],
+  ["manage_roles", "Manage Roles", "Create and edit roles below the bot."],
+  ["manage_webhooks", "Manage Webhooks", "Create and manage webhooks."],
+  ["view_audit_log", "View Audit Log", "See the server audit log."],
+  ["kick_members", "Kick Members", "Remove members from the server."],
+  ["ban_members", "Ban Members", "Ban members from the server."],
+  ["moderate_members", "Moderate Members", "Timeout or otherwise moderate members."],
+  ["change_nickname", "Change Nickname", "Change your own nickname."],
+  ["manage_nicknames", "Manage Nicknames", "Change other members' nicknames."],
+  ["connect", "Connect", "Join voice channels."],
+  ["speak", "Speak", "Transmit audio in voice channels."],
+  ["stream", "Video", "Share video or stream in voice channels."],
+  ["use_voice_activation", "Use Voice Activity", "Use voice activation instead of push-to-talk."],
+  ["mute_members", "Mute Members", "Mute members in voice channels."],
+  ["deafen_members", "Deafen Members", "Deafen members in voice channels."],
+  ["move_members", "Move Members", "Move members between voice channels."],
+  ["use_application_commands", "Use App Commands", "Use slash commands and other app commands."],
+  ["manage_events", "Manage Events", "Create and manage server events."],
+  ["administrator", "Administrator", "Grant every permission. Use with care."],
+];
+
+function rolePermissionFields() {
+  const fields = Array.isArray(managementData?.role_permission_fields)
+    ? managementData.role_permission_fields
+    : DEFAULT_ROLE_PERMISSION_FIELDS;
+  return fields.filter((field) => Array.isArray(field) ? field.length >= 2 : field && field.key)
+    .map((field) => Array.isArray(field)
+      ? { key: String(field[0]), label: String(field[1]), description: String(field[2] || "") }
+      : { key: String(field.key), label: String(field.label || field.key), description: String(field.description || "") });
 }
 
 async function runRoleAction(action, payload, button, roleName) {
@@ -1162,7 +1413,7 @@ function renderRolesPanel(editingRoleId = "") {
   heading.className = "roles-panel-heading";
   heading.append(
     textElement("h3", "server-message-title", editingRole ? "Edit role" : "Roles"),
-    textElement("p", "server-message-copy", editingRole ? "Update this role’s name and color." : "Create and manage the roles in your server."),
+    textElement("p", "server-message-copy", editingRole ? "Update this role’s name, color, and permissions." : "Create and manage the roles in your server."),
   );
   const back = textElement("button", "secondary-button", "Back to Control Panel");
   back.type = "button";
@@ -1194,6 +1445,51 @@ function renderRolesPanel(editingRoleId = "") {
     const value = colorHex.value.trim().toUpperCase();
     if (/^#[0-9A-F]{6}$/.test(value)) colorPicker.value = value;
   });
+  let permissionDraft = { ...(editingRole?.permissions || {}) };
+  let permissionSection = null;
+  if (editingRole) {
+    permissionSection = document.createElement("fieldset");
+    permissionSection.className = "role-permissions-panel";
+    const permissionHeading = document.createElement("div");
+    permissionHeading.className = "role-permissions-heading";
+    permissionHeading.append(
+      textElement("strong", "", "Role permissions"),
+      textElement("p", "", "Choose what members with this role can do. Changes apply after saving."),
+    );
+    const groups = [
+      ["Messages & channels", ["view_channel", "send_messages", "embed_links", "attach_files", "read_message_history", "add_reactions", "use_external_emojis", "send_messages_in_threads", "create_public_threads", "create_private_threads", "manage_threads", "mention_everyone", "manage_messages", "manage_channels"]],
+      ["Server management", ["manage_roles", "manage_webhooks", "view_audit_log", "kick_members", "ban_members", "moderate_members", "manage_events", "administrator"]],
+      ["Members & profile", ["change_nickname", "manage_nicknames"]],
+      ["Voice & apps", ["connect", "speak", "stream", "use_voice_activation", "mute_members", "deafen_members", "move_members", "use_application_commands"]],
+    ];
+    const fieldMap = new Map(rolePermissionFields().map((field) => [field.key, field]));
+    const groupList = document.createElement("div");
+    groupList.className = "role-permission-groups";
+    groups.forEach(([groupName, keys]) => {
+      const available = keys.map((key) => fieldMap.get(key)).filter(Boolean);
+      if (!available.length) return;
+      const group = document.createElement("section");
+      group.className = "role-permission-group";
+      group.append(textElement("h4", "", groupName));
+      const options = document.createElement("div");
+      options.className = "role-permission-grid";
+      available.forEach((field) => {
+        const option = document.createElement("label");
+        option.className = "role-permission-option";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = Boolean(permissionDraft[field.key]);
+        checkbox.addEventListener("change", () => { permissionDraft[field.key] = checkbox.checked; });
+        const copy = document.createElement("span");
+        copy.append(textElement("strong", "", field.label), textElement("small", "", field.description));
+        option.append(checkbox, copy);
+        options.append(option);
+      });
+      group.append(options);
+      groupList.append(group);
+    });
+    permissionSection.append(permissionHeading, groupList);
+  }
   const save = textElement("button", "primary-button", editingRole ? "Save changes" : "Create role");
   save.type = "submit";
   const cancel = textElement("button", "secondary-button", "Cancel");
@@ -1203,7 +1499,9 @@ function renderRolesPanel(editingRoleId = "") {
   const actions = document.createElement("div");
   actions.className = "server-message-actions";
   actions.append(cancel, save);
-  form.append(labeledControl("Role name", nameInput), labeledControl("Role color", colorRow), actions);
+  form.append(labeledControl("Role name", nameInput), labeledControl("Role color", colorRow));
+  if (permissionSection) form.append(permissionSection);
+  form.append(actions);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     const name = nameInput.value.trim();
@@ -1227,6 +1525,7 @@ function renderRolesPanel(editingRoleId = "") {
       return;
     }
     const payload = { name, color };
+    if (editingRole) payload.permissions = permissionDraft;
     if (editingRole) payload.role_id = String(editingRole.id);
     void runRoleAction(editingRole ? "edit" : "create", payload, save, name);
   });
@@ -1256,13 +1555,16 @@ function renderRolesPanel(editingRoleId = "") {
       const edit = textElement("button", "secondary-button", "Edit");
       edit.type = "button";
       edit.addEventListener("click", () => renderRolesPanel(String(role.id)));
+      const permissions = textElement("button", "secondary-button", "Permissions");
+      permissions.type = "button";
+      permissions.addEventListener("click", () => renderRolesPanel(String(role.id)));
       const remove = textElement("button", "danger-button", "Delete");
       remove.type = "button";
       remove.addEventListener("click", () => {
         if (remove.disabled || !window.confirm(`Delete the “${role.name}” role?`)) return;
         void runRoleAction("delete", { role_id: String(role.id) }, remove, role.name);
       });
-      rowActions.append(edit, remove);
+      rowActions.append(edit, permissions, remove);
     }
     row.append(swatch, details, rowActions);
     list.append(row);
@@ -1276,10 +1578,10 @@ function setManagementTab(tab) {
   if (tab !== "games" && window.BirdBotGames?.unmount) window.BirdBotGames.unmount();
   const canConfigure = managementData?.guild?.can_configure !== false;
   document.querySelectorAll("[data-management-tab]").forEach((button) => {
-    button.hidden = musicPortalMode || ((button.dataset.managementTab === "commands" || button.dataset.managementTab === "control") && !canConfigure);
+    button.hidden = musicPortalMode || (["commands", "control", "logs"].includes(button.dataset.managementTab) && !canConfigure);
   });
   if (musicPortalMode) tab = "music";
-  else if (!canConfigure && (tab === "commands" || tab === "control" || tab === "music")) tab = "tickets";
+  else if (!canConfigure && (["commands", "control", "logs", "music"].includes(tab))) tab = "tickets";
   activeManagementTab = tab;
   document.querySelectorAll("[data-management-tab]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.managementTab === tab);
@@ -1292,6 +1594,10 @@ function setManagementTab(tab) {
       ? "Ticket system"
       : tab === "control"
         ? "Control Panel"
+      : tab === "logs"
+        ? "Logs"
+      : tab === "ticket_logs"
+        ? "Ticket Logs"
       : tab === "music"
           ? "Music system"
           : tab === "games"
@@ -1301,6 +1607,8 @@ function setManagementTab(tab) {
       ? "Build the panel your members will use to open a ticket."
       : tab === "control"
         ? "Manage your server messages, roles, channels, voice, DMs, and bot profile."
+      : tab === "logs"
+        ? "Choose where BirdBot sends activity logs and enable the events you want to track."
       : tab === "music"
         ? "Link Spotify, join your current voice channel, and control BirdBot playback."
         : tab === "games"
@@ -1327,6 +1635,10 @@ function setManagementTab(tab) {
       return;
     }
     if (tab === "logs" && managementData?.guild?.id) {
+      void loadGuildLogs();
+      return;
+    }
+    if (tab === "ticket_logs" && managementData?.guild?.id) {
       void loadTicketLogs();
       return;
     }
@@ -1968,6 +2280,182 @@ async function runDeleteAllTicketLogs(button) {
   }
 }
 
+const guildLogCategories = [
+  ["voice", "Voice activity", "Joins, leaves, moves, disconnects, server mute and deaf changes."],
+  ["messages", "Message activity", "Messages sent, edited, or deleted in server channels."],
+  ["server", "Server changes", "Server settings, channel, and role changes."],
+  ["members", "Member activity", "Members joining, leaving, or changing roles/profile details."],
+  ["moderation", "Moderation actions", "Bans, kicks, warnings, warning removals, timeouts, and unbans."],
+];
+
+function guildLogEventName(value) {
+  return String(value || "event").replaceAll("_", " ").replace(/^./, (character) => character.toUpperCase());
+}
+
+function renderGuildLogs(logs, query = "") {
+  guildLogsQuery = query;
+  commandGrid.replaceChildren();
+  const wrapper = document.createElement("section");
+  wrapper.className = "guild-logs-view";
+  const settingsPanel = document.createElement("section");
+  settingsPanel.className = "guild-logs-settings";
+  const settingsHeading = document.createElement("div");
+  settingsHeading.className = "guild-logs-heading";
+  settingsHeading.append(
+    textElement("strong", "", "Activity log settings"),
+    textElement("p", "command-settings-hint", "Choose a separate channel for each activity stream and enable only the logs you need."),
+  );
+  const config = managementData?.log_config || {};
+  const categoryValues = config.categories || {};
+  const categoryDestinations = config.category_channels || {};
+  const enabledLabel = document.createElement("label");
+  enabledLabel.className = "command-inline-toggle guild-logs-master";
+  const enabled = document.createElement("input");
+  enabled.type = "checkbox";
+  enabled.checked = config.enabled === true;
+  enabledLabel.append(enabled, textElement("span", "", "Enable activity logs"));
+  const categoryGrid = document.createElement("div");
+  categoryGrid.className = "guild-logs-category-grid";
+  const categoryInputs = {};
+  const categoryChannelInputs = {};
+  guildLogCategories.forEach(([key, title, description]) => {
+    const label = document.createElement("label");
+    label.className = "guild-log-category";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = categoryValues[key] !== false;
+    categoryInputs[key] = checkbox;
+    const copy = document.createElement("span");
+    copy.className = "guild-log-category-copy";
+    copy.append(textElement("strong", "guild-log-category-title", title), textElement("small", "guild-log-category-description", description));
+    const channel = createChannelSelect();
+    channel.classList.add("guild-log-category-channel");
+    channel.setAttribute("aria-label", `${title} log channel`);
+    channel.value = categoryDestinations[key] || "";
+    categoryChannelInputs[key] = channel;
+    label.append(checkbox, copy, channel);
+    categoryGrid.append(label);
+  });
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "primary-button guild-logs-save";
+  save.textContent = "Save log settings";
+  const status = textElement("span", "command-settings-status", "");
+  save.addEventListener("click", async () => {
+    save.disabled = true;
+    status.textContent = "Saving...";
+    status.className = "command-settings-status is-loading";
+    try {
+      const result = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/control/logs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: enabled.checked,
+          log_channel_id: null,
+          categories: Object.fromEntries(Object.entries(categoryInputs).map(([key, input]) => [key, input.checked])),
+          category_channels: Object.fromEntries(Object.entries(categoryChannelInputs).map(([key, input]) => [key, input.value || null])),
+        }),
+      });
+      managementData.log_config = result.log_config;
+      status.textContent = "Saved and applied to Discord.";
+      status.className = "command-settings-status is-success";
+      commandFeedback.hidden = false;
+      commandFeedback.textContent = "Activity log settings saved.";
+    } catch (error) {
+      status.textContent = errorMessage(error, "Log settings could not be saved.");
+      status.className = "command-settings-status is-error";
+    } finally {
+      save.disabled = false;
+    }
+  });
+  settingsPanel.append(
+    settingsHeading,
+    enabledLabel,
+    categoryGrid,
+    document.createElement("div"),
+  );
+  const actions = settingsPanel.lastElementChild;
+  actions.className = "guild-logs-actions";
+  actions.append(save, status);
+  const toolbar = document.createElement("div");
+  toolbar.className = "ticket-logs-toolbar guild-logs-toolbar";
+  const search = document.createElement("input");
+  search.type = "search";
+  search.className = "channel-select ticket-logs-search";
+  search.placeholder = "Search activity logs...";
+  search.value = query;
+  const count = textElement("span", "ticket-logs-count", `${logs.length} event${logs.length === 1 ? "" : "s"}`);
+  toolbar.append(search, count);
+  const table = document.createElement("div");
+  table.className = "ticket-logs-table guild-logs-table";
+  if (!logs.length) table.append(textElement("p", "empty-state", "No activity events have been logged yet."));
+  logs.forEach((log) => {
+    const row = document.createElement("article");
+    row.className = "ticket-log-row guild-log-row";
+    const header = document.createElement("div");
+    header.className = "ticket-log-header guild-log-header";
+    const actorIdentity = document.createElement("span");
+    actorIdentity.className = "guild-log-identity";
+    if (typeof log.actor_avatar_url === "string" && /^https:\/\//i.test(log.actor_avatar_url)) {
+      const avatar = document.createElement("img");
+      avatar.className = "guild-log-avatar";
+      avatar.src = log.actor_avatar_url;
+      avatar.alt = "";
+      avatar.loading = "lazy";
+      avatar.addEventListener("error", () => avatar.remove(), { once: true });
+      actorIdentity.append(avatar);
+    }
+    const actorName = String(log.actor_name || "System");
+    actorIdentity.append(textElement("span", "guild-log-mention", log.actor_id ? `@${actorName}` : actorName));
+    header.append(actorIdentity, textElement("span", "ticket-log-event-name guild-log-event", guildLogEventName(log.event_type)));
+    const channel = log.channel_name ? `#${log.channel_name}` : "No channel";
+    header.append(textElement("span", "guild-log-channel", channel));
+    const meta = textElement("div", "ticket-log-meta", formatTicketDate(log.created_at));
+    if (log.target_name) meta.textContent += ` · Target: ${log.target_id ? `@${log.target_name}` : log.target_name}`;
+    row.append(header, meta);
+    if (log.details) row.append(textElement("p", "ticket-log-details guild-log-details", log.details));
+    table.append(row);
+  });
+  search.addEventListener("input", () => {
+    const needle = search.value.trim().toLowerCase();
+    const filtered = logs.filter((log) => JSON.stringify(log).toLowerCase().includes(needle));
+    renderGuildLogs(filtered, search.value);
+    const replacement = commandGrid.querySelector(".ticket-logs-search");
+    if (replacement) {
+      replacement.focus();
+      replacement.setSelectionRange(replacement.value.length, replacement.value.length);
+    }
+  });
+  wrapper.append(settingsPanel, toolbar, table);
+  commandGrid.append(wrapper);
+}
+
+async function loadGuildLogs(showLoading = true) {
+  if (!managementData?.guild?.id) return;
+  if (showLoading) {
+    renderTicketLogsSkeleton();
+    beginLoading("Loading activity logs...", false);
+  }
+  try {
+    const query = guildLogsQuery.trim();
+    const queryString = query ? `?q=${encodeURIComponent(query)}` : "";
+    const result = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/logs${queryString}`, { cache: "no-store" });
+    managementData.log_config = result.log_config || managementData.log_config || {};
+    managementTitle.textContent = "Logs";
+    managementDescription.textContent = "Choose where BirdBot sends activity logs and enable the events you want to track.";
+    const logs = result.logs || [];
+    const snapshot = JSON.stringify({ logs, config: managementData.log_config });
+    if (showLoading || snapshot !== guildLogsSnapshot) {
+      guildLogsSnapshot = snapshot;
+      renderGuildLogs(logs, guildLogsQuery);
+    }
+  } catch (error) {
+    commandGrid.replaceChildren(textElement("p", "form-error", errorMessage(error, "Activity logs could not be loaded.")));
+  } finally {
+    if (showLoading) endLoading(false);
+  }
+}
+
 function renderCommands() {
   commandGrid.replaceChildren();
   const saved = managementData.command_settings || {};
@@ -1991,7 +2479,7 @@ function renderCommands() {
   toolbarHeading.className = "commands-settings-heading";
   toolbarHeading.append(
     textElement("strong", "", "Prefix commands"),
-    textElement("p", "command-settings-hint", "Configure how text commands work in this server. Shortcuts only work with the prefix."),
+    textElement("p", "command-settings-hint", "Configure how text commands work in this server. Shortcuts work with or without the prefix."),
   );
   const toolbarControls = document.createElement("div");
   toolbarControls.className = "commands-settings-controls";
@@ -2055,13 +2543,14 @@ function renderCommands() {
 
   managementData.commands.forEach((command) => {
     const setting = draft.commands[command.name];
+    const commandInvocation = String(command.label || `/${command.name}`).replace(/^\/+/, "");
     const card = document.createElement("article");
     card.className = `command-card${command.name === "ban" ? " ban-command-card" : ""}${setting.enabled ? "" : " command-card-disabled"}`;
     const button = document.createElement("button");
     button.className = "command-button";
     button.type = "button";
-    button.dataset.commandPreview = command.name;
-    button.textContent = `${draft.prefix}${command.name}`;
+    button.dataset.commandPreview = commandInvocation;
+    button.textContent = `${draft.prefix}${commandInvocation}`;
     const description = textElement("p", "command-description", command.description);
     const config = document.createElement("div");
     config.className = "command-config";
@@ -2130,7 +2619,7 @@ function renderCommands() {
     config.append(enabledLabel, labeledControl("Shortcuts (without the prefix)", shortcutsField), labeledControl("Reply language", languageSelect));
     const select = createChannelSelect();
     let memberSelect = null;
-    if (["profile", "kick", "ban"].includes(command.name)) {
+    if (["profile", "kick", "ban", "warning", "show_warning", "timeout"].includes(command.name)) {
       const memberControl = createMemberSelect();
       memberSelect = memberControl.select;
       let searchTimer = null;
@@ -2154,7 +2643,7 @@ function renderCommands() {
     }
     let reason = null;
     let deleteDays = null;
-    if (["kick", "ban"].includes(command.name)) {
+    if (["kick", "ban", "warning", "timeout"].includes(command.name)) {
       reason = document.createElement("input");
       reason.className = "channel-select";
       reason.maxLength = 512;
@@ -2162,8 +2651,46 @@ function renderCommands() {
       config.append(labeledControl("Reason (optional)", reason));
       const announcement = command.name === "kick"
         ? "Announcement: @user has been Kicked from the server"
-        : "Announcement: @user has been Banned from the server";
+        : command.name === "ban"
+          ? "Announcement: @user has been Banned from the server"
+          : command.name === "warning"
+            ? "The member will receive a numbered warning and a private notification when possible."
+            : "The member will be timed out for the selected duration.";
       config.append(textElement("p", "command-description command-announcement", announcement));
+    }
+    let warningNumber = null;
+    if (command.name === "unwarning") {
+      warningNumber = document.createElement("input");
+      warningNumber.className = "channel-select";
+      warningNumber.type = "number";
+      warningNumber.min = "1";
+      warningNumber.step = "1";
+      warningNumber.placeholder = "Warning number, for example 12";
+      config.append(labeledControl("Warning number", warningNumber));
+    }
+    let durationMinutes = null;
+    if (command.name === "timeout") {
+      durationMinutes = document.createElement("input");
+      durationMinutes.className = "channel-select";
+      durationMinutes.type = "number";
+      durationMinutes.min = "1";
+      durationMinutes.max = "40320";
+      durationMinutes.step = "1";
+      durationMinutes.value = "10";
+      durationMinutes.placeholder = "Minutes (1-40320)";
+      config.append(labeledControl("Timeout duration (minutes)", durationMinutes));
+    }
+    let deleteAmount = null;
+    if (command.name === "delete") {
+      deleteAmount = document.createElement("input");
+      deleteAmount.className = "channel-select";
+      deleteAmount.type = "number";
+      deleteAmount.min = "1";
+      deleteAmount.max = "100";
+      deleteAmount.step = "1";
+      deleteAmount.value = "10";
+      deleteAmount.placeholder = "Messages (1-100)";
+      config.append(labeledControl("Number of messages", deleteAmount));
     }
     if (command.name === "ban") {
       deleteDays = document.createElement("select");
@@ -2179,12 +2706,15 @@ function renderCommands() {
     runButton.className = "primary-button";
     runButton.type = "button";
     runButton.disabled = !managementData.channels.length || !setting.enabled;
-    if (command.name !== "server") runButton.dataset.commandRunLabel = command.name;
-    runButton.textContent = command.name === "server" ? "Send Server Info" : `Run ${draft.prefix}${command.name}`;
+    if (command.name !== "server") runButton.dataset.commandRunLabel = commandInvocation;
+    runButton.textContent = command.name === "server" ? "Send Server Info" : `Run ${draft.prefix}${commandInvocation}`;
     button.addEventListener("click", () => { config.hidden = !config.hidden; });
     runButton.addEventListener("click", () => runWebsiteCommand(command.name, select, runButton, {
       member_id: memberSelect?.value,
       reason: reason?.value,
+      warning_id: warningNumber?.value,
+      duration_minutes: durationMinutes ? Number(durationMinutes.value) : undefined,
+      amount: deleteAmount ? Number(deleteAmount.value) : undefined,
       delete_message_days: deleteDays ? Number(deleteDays.value) : 0,
     }));
     config.append(labeledControl("Target text channel", select), runButton);
@@ -2403,14 +2933,15 @@ async function runWebsiteCommand(commandName, select, button, payload = {}) {
     commandFeedback.textContent = "Choose a text channel first.";
     return;
   }
-  if (["profile", "kick", "ban"].includes(commandName) && !payload.member_id) {
+  if (["profile", "kick", "ban", "warning", "show_warning", "timeout"].includes(commandName) && !payload.member_id) {
     commandFeedback.hidden = false;
     commandFeedback.textContent = "Choose a target member first.";
     return;
   }
   button.disabled = true;
   button.textContent = "Sending...";
-  beginLoading(`Sending ${commandPrefix}${commandName} to BirdBot...`);
+  const commandLabel = commandName === "show_warning" ? "show warning" : commandName;
+  beginLoading(`Sending ${commandPrefix}${commandLabel} to BirdBot...`);
   try {
     const queued = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/commands/${commandName}`, {
       method: "POST",
@@ -2418,7 +2949,7 @@ async function runWebsiteCommand(commandName, select, button, payload = {}) {
       body: JSON.stringify({ channel_id: select.value, ...payload }),
     });
     commandFeedback.hidden = false;
-    commandFeedback.textContent = `${commandPrefix}${commandName} is being sent to the selected channel...`;
+    commandFeedback.textContent = `${commandPrefix}${commandLabel} is being sent to the selected channel...`;
     for (let attempt = 0; attempt < 30; attempt += 1) {
       // The bot worker checks its queue every two seconds; a shorter poll
       // interval makes completed commands feel immediate without waiting for
@@ -2430,8 +2961,8 @@ async function runWebsiteCommand(commandName, select, button, payload = {}) {
           ? "@user has been Kicked from the server"
           : commandName === "ban" ? "@user has been Banned from the server" : "";
         commandFeedback.textContent = announcement
-          ? `${commandPrefix}${commandName} completed. ${announcement}`
-          : `${commandPrefix}${commandName} was sent successfully.`;
+          ? `${commandPrefix}${commandLabel} completed. ${announcement}`
+          : `${commandPrefix}${commandLabel} was sent successfully.`;
         if (commandName === "ban" || commandName === "unban") {
           const bans = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/bans`);
           managementData.bans = bans.bans;
@@ -2441,14 +2972,14 @@ async function runWebsiteCommand(commandName, select, button, payload = {}) {
       }
       if (status.status === "failed") throw new Error(status.error || "BirdBot could not run that command.");
     }
-    commandFeedback.textContent = `${commandPrefix}${commandName} is still queued. Check the selected channel shortly.`;
+    commandFeedback.textContent = `${commandPrefix}${commandLabel} is still queued. Check the selected channel shortly.`;
   } catch (error) {
     commandFeedback.hidden = false;
     commandFeedback.textContent = errorMessage(error, "BirdBot could not run that command.");
   } finally {
     endLoading();
     button.disabled = false;
-    button.textContent = commandName === "server" ? "Send Server Info" : `Run ${commandPrefix}${commandName}`;
+    button.textContent = commandName === "server" ? "Send Server Info" : `Run ${commandPrefix}${commandLabel}`;
   }
 }
 
@@ -2683,7 +3214,7 @@ showTicketsButton.addEventListener("click", () => {
   }
 });
 ticketLogsButton.addEventListener("click", () => {
-  setManagementTab("logs");
+  setManagementTab("ticket_logs");
 });
 function refreshActiveTicketView() {
   if (document.hidden || managementView.hidden || pendingRequests > 0) return;
@@ -2692,9 +3223,14 @@ function refreshActiveTicketView() {
     void loadTicketsPage(false).finally(() => { ticketRefreshInFlight = false; });
     return;
   }
-  if (activeManagementTab === "logs" && !ticketLogsRefreshInFlight) {
+  if (activeManagementTab === "ticket_logs" && !ticketLogsRefreshInFlight) {
     ticketLogsRefreshInFlight = true;
     void loadTicketLogs(false).finally(() => { ticketLogsRefreshInFlight = false; });
+    return;
+  }
+  if (activeManagementTab === "logs" && !guildLogsRefreshInFlight) {
+    guildLogsRefreshInFlight = true;
+    void loadGuildLogs(false).finally(() => { guildLogsRefreshInFlight = false; });
   }
 }
 // Discord-side claims and timeout deletions are reflected without requiring a

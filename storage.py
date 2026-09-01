@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from settings import COMMAND_PREFIX, DATA_PATH
+from role_permissions import ROLE_PERMISSION_KEYS, normalize_role_permissions
 
 
 # Tickets that remain unclaimed for this period are automatically archived by
@@ -20,7 +21,52 @@ UNCLAIMED_TICKET_TIMEOUT_SECONDS = 300
 
 # Commands exposed by the website's Commands tab. Keeping this list in the
 # shared store makes the API and Discord worker agree on valid settings.
-DASHBOARD_COMMAND_NAMES = ("ping", "server", "profile", "kick", "ban")
+DASHBOARD_COMMAND_NAMES = (
+    "ping",
+    "server",
+    "profile",
+    "kick",
+    "ban",
+    "warning",
+    "unwarning",
+    "show_warning",
+    "timeout",
+    "lock",
+    "unlock",
+    "delete",
+)
+
+# General server activity is grouped into dashboard-controlled streams.
+# Keep the mapping in the shared store so the API and Discord event listeners
+# cannot drift apart.
+LOG_CATEGORIES = ("voice", "messages", "server", "members", "moderation")
+LOG_EVENT_CATEGORIES = {
+    "voice_join": "voice",
+    "voice_leave": "voice",
+    "voice_move": "voice",
+    "voice_disconnect": "voice",
+    "voice_server_mute": "voice",
+    "voice_server_deaf": "voice",
+    "message_sent": "messages",
+    "message_edited": "messages",
+    "message_deleted": "messages",
+    "server_update": "server",
+    "channel_create": "server",
+    "channel_update": "server",
+    "channel_delete": "server",
+    "role_create": "server",
+    "role_update": "server",
+    "role_delete": "server",
+    "member_join": "members",
+    "member_leave": "members",
+    "member_update": "members",
+    "moderation_kick": "moderation",
+    "moderation_ban": "moderation",
+    "moderation_unban": "moderation",
+    "moderation_warning": "moderation",
+    "moderation_unwarning": "moderation",
+    "moderation_timeout": "moderation",
+}
 
 
 def utc_now() -> str:
@@ -203,6 +249,7 @@ class BirdBotStore:
                     position INTEGER NOT NULL DEFAULT 0,
                     managed INTEGER NOT NULL DEFAULT 0,
                     color TEXT NOT NULL DEFAULT '#000000',
+                    permissions TEXT NOT NULL DEFAULT '{}',
                     last_seen_at TEXT NOT NULL
                 )
                 """
@@ -217,9 +264,23 @@ class BirdBotStore:
                     requested_by TEXT NOT NULL,
                     status TEXT NOT NULL,
                     error TEXT,
+                    result TEXT,
                     payload TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL,
                     completed_at TEXT
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS guild_auto_reacts (
+                    rule_id TEXT PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    emoji TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    updated_by TEXT,
+                    updated_at TEXT NOT NULL
                 )
                 """
             )
@@ -250,6 +311,23 @@ class BirdBotStore:
                     reason TEXT,
                     banned_at TEXT NOT NULL,
                     PRIMARY KEY (user_id, guild_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS warnings (
+                    warning_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL,
+                    member_id TEXT NOT NULL,
+                    member_name TEXT NOT NULL,
+                    moderator_id TEXT NOT NULL,
+                    moderator_name TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    removed_at TEXT,
+                    removed_by TEXT,
+                    removed_by_name TEXT
                 )
                 """
             )
@@ -325,6 +403,45 @@ class BirdBotStore:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS guild_log_configs (
+                    guild_id TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    log_channel_id TEXT,
+                    voice_channel_id TEXT,
+                    messages_channel_id TEXT,
+                    server_channel_id TEXT,
+                    members_channel_id TEXT,
+                    moderation_channel_id TEXT,
+                    voice_enabled INTEGER NOT NULL DEFAULT 1,
+                    messages_enabled INTEGER NOT NULL DEFAULT 1,
+                    server_enabled INTEGER NOT NULL DEFAULT 1,
+                    members_enabled INTEGER NOT NULL DEFAULT 1,
+                    moderation_enabled INTEGER NOT NULL DEFAULT 1,
+                    updated_by TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS guild_logs (
+                    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    actor_id TEXT,
+                    actor_name TEXT,
+                    actor_avatar_url TEXT,
+                    target_id TEXT,
+                    target_name TEXT,
+                    channel_id TEXT,
+                    channel_name TEXT,
+                    details TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS spy_game_logs (
                     log_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     guild_id TEXT NOT NULL,
@@ -374,12 +491,17 @@ class BirdBotStore:
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_guild_creator_status ON tickets (guild_id, creator_id, status)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_logs_guild_created ON ticket_logs (guild_id, created_at DESC, log_id DESC)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_ticket_logs_guild_ticket ON ticket_logs (guild_id, ticket_id, created_at DESC)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_guild_logs_guild_created ON guild_logs (guild_id, created_at DESC, log_id DESC)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_guild_logs_guild_event ON guild_logs (guild_id, event_type, created_at DESC)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_spy_game_logs_guild_match ON spy_game_logs (guild_id, match_at DESC, log_id DESC)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_spy_game_configs_updated ON spy_game_configs (updated_at DESC)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_roulette_game_configs_updated ON roulette_game_configs (updated_at DESC)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_bot_members_guild_status_name ON bot_members (guild_id, is_bot, display_name COLLATE NOCASE)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_bot_members_guild_member_id ON bot_members (guild_id, member_id)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_command_requests_pending ON command_requests (status, created_at)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_guild_auto_reacts_channel ON guild_auto_reacts (guild_id, channel_id, enabled)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_warnings_member ON warnings (guild_id, member_id, warning_id DESC)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_warnings_guild_active ON warnings (guild_id, removed_at, warning_id DESC)")
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(oauth_sessions)")}
             for name, definition in (
                 ("refresh_token", "TEXT"),
@@ -402,9 +524,13 @@ class BirdBotStore:
             role_columns = {row["name"] for row in connection.execute("PRAGMA table_info(bot_roles)")}
             if "color" not in role_columns:
                 connection.execute("ALTER TABLE bot_roles ADD COLUMN color TEXT NOT NULL DEFAULT '#000000'")
+            if "permissions" not in role_columns:
+                connection.execute("ALTER TABLE bot_roles ADD COLUMN permissions TEXT NOT NULL DEFAULT '{}'")
             command_columns = {row["name"] for row in connection.execute("PRAGMA table_info(command_requests)")}
             if "payload" not in command_columns:
                 connection.execute("ALTER TABLE command_requests ADD COLUMN payload TEXT NOT NULL DEFAULT '{}'")
+            if "result" not in command_columns:
+                connection.execute("ALTER TABLE command_requests ADD COLUMN result TEXT")
             member_columns = {row["name"] for row in connection.execute("PRAGMA table_info(bot_members)")}
             for name, definition in (("username", "TEXT"), ("global_name", "TEXT"), ("role_ids", "TEXT NOT NULL DEFAULT '[]'")):
                 if name not in member_columns:
@@ -470,6 +596,15 @@ class BirdBotStore:
             ticket_log_columns = {row["name"] for row in connection.execute("PRAGMA table_info(ticket_logs)")}
             if "dm_status" not in ticket_log_columns:
                 connection.execute("ALTER TABLE ticket_logs ADD COLUMN dm_status TEXT")
+            log_config_columns = {row["name"] for row in connection.execute("PRAGMA table_info(guild_log_configs)")}
+            for name in ("voice_channel_id", "messages_channel_id", "server_channel_id", "members_channel_id", "moderation_channel_id"):
+                if name not in log_config_columns:
+                    connection.execute(f"ALTER TABLE guild_log_configs ADD COLUMN {name} TEXT")
+            if "moderation_enabled" not in log_config_columns:
+                connection.execute("ALTER TABLE guild_log_configs ADD COLUMN moderation_enabled INTEGER NOT NULL DEFAULT 1")
+            log_columns = {row["name"] for row in connection.execute("PRAGMA table_info(guild_logs)")}
+            if "actor_avatar_url" not in log_columns:
+                connection.execute("ALTER TABLE guild_logs ADD COLUMN actor_avatar_url TEXT")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_unclaimed_deadline ON tickets (status, claimed_by, unclaimed_until)")
 
     def sync_bot_guilds(self, guilds: Iterable[object]) -> None:
@@ -496,7 +631,14 @@ class BirdBotStore:
             for channel in getattr(guild, "text_channels", [])
             if getattr(guild, "me", None)
             and channel.permissions_for(guild.me).view_channel
-            and channel.permissions_for(guild.me).send_messages
+            # Keep moderation channels visible even when @everyone is denied
+            # Send Messages.  In particular, a locked channel must remain
+            # selectable in the dashboard so its /unlock action can run.
+            and (
+                channel.permissions_for(guild.me).send_messages
+                or channel.permissions_for(guild.me).manage_channels
+                or channel.permissions_for(guild.me).manage_messages
+            )
         ]
         category_records = [
             (str(category.id), str(guild.id), category.name, now)
@@ -511,6 +653,14 @@ class BirdBotStore:
                 int(role.position),
                 int(role.managed),
                 f"#{int(getattr(getattr(role, 'colour', None), 'value', 0)):06X}",
+                json.dumps(
+                    {
+                        key: bool(getattr(getattr(role, "permissions", None), key, False))
+                        for key in ROLE_PERMISSION_KEYS
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
                 now,
             )
             for guild in guilds
@@ -535,7 +685,7 @@ class BirdBotStore:
                 category_records,
             )
             connection.executemany(
-                "INSERT INTO bot_roles (role_id, guild_id, name, position, managed, color, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO bot_roles (role_id, guild_id, name, position, managed, color, permissions, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 role_records,
             )
             connection.execute(
@@ -564,6 +714,14 @@ class BirdBotStore:
                 int(role.position),
                 int(role.managed),
                 f"#{int(getattr(getattr(role, 'colour', None), 'value', 0)):06X}",
+                json.dumps(
+                    {
+                        key: bool(getattr(getattr(role, "permissions", None), key, False))
+                        for key in ROLE_PERMISSION_KEYS
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
                 now,
             )
             for role in getattr(guild, "roles", [])
@@ -572,7 +730,7 @@ class BirdBotStore:
         with self._connect() as connection:
             connection.execute("DELETE FROM bot_roles WHERE guild_id = ?", (guild_id,))
             connection.executemany(
-                "INSERT INTO bot_roles (role_id, guild_id, name, position, managed, color, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO bot_roles (role_id, guild_id, name, position, managed, color, permissions, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 role_records,
             )
         self._invalidate_cache()
@@ -786,6 +944,137 @@ class BirdBotStore:
             ).fetchall()
         return self._cache_set(key, [{"id": row["channel_id"], "name": row["name"]} for row in rows], ttl=20.0)  # type: ignore[return-value]
 
+    def log_config(self, guild_id: str) -> dict[str, object]:
+        """Return the per-server audit log destination and enabled streams."""
+        guild_id = str(guild_id)
+        key = f"log_config:{guild_id}"
+        cached = self._cache_get(key)
+        if cached is not self._CACHE_MISS:
+            return cached  # type: ignore[return-value]
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT enabled, log_channel_id, voice_channel_id, messages_channel_id, server_channel_id, members_channel_id, moderation_channel_id, "
+                "voice_enabled, messages_enabled, server_enabled, members_enabled, moderation_enabled, updated_by, updated_at "
+                "FROM guild_log_configs WHERE guild_id = ?", (guild_id,),
+            ).fetchone()
+        legacy_channel = row["log_channel_id"] if row else None
+        category_column_names = ("voice_channel_id", "messages_channel_id", "server_channel_id", "members_channel_id", "moderation_channel_id")
+        has_explicit_destinations = bool(row and any(row[name] is not None for name in category_column_names))
+        category_channels = {
+            "voice": row["voice_channel_id"] if has_explicit_destinations else legacy_channel,
+            "messages": row["messages_channel_id"] if has_explicit_destinations else legacy_channel,
+            "server": row["server_channel_id"] if has_explicit_destinations else legacy_channel,
+            "members": row["members_channel_id"] if has_explicit_destinations else legacy_channel,
+            "moderation": row["moderation_channel_id"] if has_explicit_destinations else legacy_channel,
+        }
+        result = {
+            "guild_id": guild_id,
+            "enabled": bool(row["enabled"]) if row else False,
+            # Keep the old key for clients that have not refreshed yet. New
+            # callers use category_channels so each stream can be routed
+            # independently.
+            "log_channel_id": legacy_channel,
+            "category_channels": category_channels,
+            "categories": {
+                "voice": bool(row["voice_enabled"]) if row else True,
+                "messages": bool(row["messages_enabled"]) if row else True,
+                "server": bool(row["server_enabled"]) if row else True,
+                "members": bool(row["members_enabled"]) if row else True,
+                "moderation": bool(row["moderation_enabled"]) if row else True,
+            },
+            "updated_by": row["updated_by"] if row else None,
+            "updated_at": row["updated_at"] if row else None,
+        }
+        return self._cache_set(key, result, ttl=5.0)  # type: ignore[return-value]
+
+    def save_log_config(
+        self,
+        guild_id: str,
+        enabled: bool,
+        log_channel_id: str | None,
+        categories: dict[str, object] | None,
+        updated_by: str | None = None,
+        category_channels: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        guild_id = str(guild_id)
+        categories = categories if isinstance(categories, dict) else {}
+        values = {key: bool(categories.get(key, True)) for key in LOG_CATEGORIES}
+        category_channels = category_channels if isinstance(category_channels, dict) else {}
+        destinations = {
+            key: (str(category_channels.get(key)) if category_channels.get(key) else None)
+            for key in LOG_CATEGORIES
+        }
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO guild_log_configs (guild_id, enabled, log_channel_id, voice_channel_id, messages_channel_id, server_channel_id, members_channel_id, moderation_channel_id, voice_enabled, messages_enabled, server_enabled, members_enabled, moderation_enabled, updated_by, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled, log_channel_id=excluded.log_channel_id, "
+                "voice_channel_id=excluded.voice_channel_id, messages_channel_id=excluded.messages_channel_id, server_channel_id=excluded.server_channel_id, members_channel_id=excluded.members_channel_id, moderation_channel_id=excluded.moderation_channel_id, "
+                "voice_enabled=excluded.voice_enabled, messages_enabled=excluded.messages_enabled, server_enabled=excluded.server_enabled, members_enabled=excluded.members_enabled, moderation_enabled=excluded.moderation_enabled, "
+                "updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+                (guild_id, int(bool(enabled)), str(log_channel_id) if log_channel_id else None,
+                 destinations["voice"], destinations["messages"], destinations["server"], destinations["members"], destinations["moderation"],
+                 int(values["voice"]), int(values["messages"]), int(values["server"]), int(values["members"]), int(values["moderation"]), updated_by, now),
+            )
+        self._invalidate_cache()
+        return self.log_config(guild_id)
+
+    def create_log(
+        self,
+        guild_id: str,
+        event_type: str,
+        *,
+        actor_id: str | None = None,
+        actor_name: str | None = None,
+        actor_avatar_url: str | None = None,
+        target_id: str | None = None,
+        target_name: str | None = None,
+        channel_id: str | None = None,
+        channel_name: str | None = None,
+        details: str = "",
+    ) -> dict[str, object]:
+        now = utc_now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO guild_logs (guild_id, event_type, actor_id, actor_name, actor_avatar_url, target_id, target_name, channel_id, channel_name, details, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (str(guild_id), str(event_type), actor_id, actor_name, actor_avatar_url, target_id, target_name, channel_id, channel_name, str(details or "")[:4000], now),
+            )
+            log_id = cursor.lastrowid
+        self._invalidate_cache()
+        return {
+            "log_id": log_id, "guild_id": str(guild_id), "event_type": str(event_type),
+            "actor_id": actor_id, "actor_name": actor_name, "actor_avatar_url": actor_avatar_url, "target_id": target_id,
+            "target_name": target_name, "channel_id": channel_id, "channel_name": channel_name,
+            "details": str(details or "")[:4000], "created_at": now,
+        }
+
+    def logs(self, guild_id: str, query: str = "", limit: int = 500) -> list[dict[str, object]]:
+        guild_id = str(guild_id)
+        normalized = str(query or "").strip()[:120]
+        limit = max(1, min(int(limit), 1_000))
+        key = f"guild_logs:{guild_id}:{normalized.casefold()}:{limit}"
+        cached = self._cache_get(key)
+        if cached is not self._CACHE_MISS:
+            return cached  # type: ignore[return-value]
+        with self._connect() as connection:
+            if normalized:
+                pattern = f"%{normalized}%"
+                rows = connection.execute(
+                    "SELECT log_id, guild_id, event_type, actor_id, actor_name, actor_avatar_url, target_id, target_name, channel_id, channel_name, details, created_at "
+                    "FROM guild_logs WHERE guild_id = ? AND (event_type LIKE ? OR actor_name LIKE ? OR target_name LIKE ? OR channel_name LIKE ? OR details LIKE ?) "
+                    "ORDER BY created_at DESC, log_id DESC LIMIT ?",
+                    (guild_id, pattern, pattern, pattern, pattern, pattern, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT log_id, guild_id, event_type, actor_id, actor_name, actor_avatar_url, target_id, target_name, channel_id, channel_name, details, created_at "
+                    "FROM guild_logs WHERE guild_id = ? ORDER BY created_at DESC, log_id DESC LIMIT ?",
+                    (guild_id, limit),
+                ).fetchall()
+        result = [dict(row) for row in rows]
+        return self._cache_set(key, result, ttl=3.0)  # type: ignore[return-value]
+
     def bot_categories(self, guild_id: str) -> list[dict[str, str]]:
         key = f"bot_categories:{guild_id}"
         cached = self._cache_get(key)
@@ -805,19 +1094,25 @@ class BirdBotStore:
             return cached  # type: ignore[return-value]
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT role_id, name, position, managed, color FROM bot_roles WHERE guild_id = ? ORDER BY position DESC, lower(name)",
+                "SELECT role_id, name, position, managed, color, permissions FROM bot_roles WHERE guild_id = ? ORDER BY position DESC, lower(name)",
                 (guild_id,),
             ).fetchall()
-        result = [
-            {
-                "id": row["role_id"],
-                "name": row["name"],
-                "position": row["position"],
-                "managed": bool(row["managed"]),
-                "color": row["color"] or "#000000",
-            }
-            for row in rows
-        ]
+        result = []
+        for row in rows:
+            try:
+                raw_permissions = json.loads(row["permissions"] or "{}")
+            except (TypeError, ValueError):
+                raw_permissions = {}
+            result.append(
+                {
+                    "id": row["role_id"],
+                    "name": row["name"],
+                    "position": row["position"],
+                    "managed": bool(row["managed"]),
+                    "color": row["color"] or "#000000",
+                    "permissions": normalize_role_permissions(raw_permissions),
+                }
+            )
         return self._cache_set(key, result, ttl=20.0)  # type: ignore[return-value]
 
     def ticket_config(self, guild_id: str) -> dict[str, object]:
@@ -1629,6 +1924,100 @@ class BirdBotStore:
         result = {**dict(row), "roles": json.loads(row["roles"] or "[]"), "role_ids": json.loads(row["role_ids"] or "[]")} if row else None
         return self._cache_set(key, result, ttl=15.0)  # type: ignore[return-value]
 
+    def add_warning(
+        self,
+        guild_id: str,
+        member_id: str,
+        member_name: str,
+        moderator_id: str,
+        moderator_name: str,
+        reason: str = "",
+    ) -> dict[str, object]:
+        """Create a numbered warning and return its complete record.
+
+        The SQLite AUTOINCREMENT key is deliberately used as the warning
+        number. It is unique across the database, so a number can never point
+        at a different warning after one is removed.
+        """
+        guild_id = str(guild_id)
+        created_at = utc_now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO warnings (guild_id, member_id, member_name, moderator_id, moderator_name, reason, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    guild_id,
+                    str(member_id),
+                    str(member_name),
+                    str(moderator_id),
+                    str(moderator_name),
+                    str(reason or ""),
+                    created_at,
+                ),
+            )
+            warning_id = int(cursor.lastrowid)
+        self._invalidate_cache()
+        return self.warning(guild_id, warning_id) or {
+            "warning_id": warning_id,
+            "guild_id": guild_id,
+            "member_id": str(member_id),
+            "member_name": str(member_name),
+            "moderator_id": str(moderator_id),
+            "moderator_name": str(moderator_name),
+            "reason": str(reason or ""),
+            "created_at": created_at,
+            "removed_at": None,
+            "removed_by": None,
+            "removed_by_name": None,
+        }
+
+    def warning(self, guild_id: str, warning_id: int) -> dict[str, object] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT warning_id, guild_id, member_id, member_name, moderator_id, moderator_name, reason, created_at, "
+                "removed_at, removed_by, removed_by_name FROM warnings WHERE guild_id = ? AND warning_id = ?",
+                (str(guild_id), int(warning_id)),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def warnings_for_member(
+        self,
+        guild_id: str,
+        member_id: str,
+        include_removed: bool = False,
+    ) -> list[dict[str, object]]:
+        query = (
+            "SELECT warning_id, guild_id, member_id, member_name, moderator_id, moderator_name, reason, created_at, "
+            "removed_at, removed_by, removed_by_name FROM warnings WHERE guild_id = ? AND member_id = ?"
+        )
+        parameters: list[object] = [str(guild_id), str(member_id)]
+        if not include_removed:
+            query += " AND removed_at IS NULL"
+        query += " ORDER BY warning_id ASC"
+        with self._connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [dict(row) for row in rows]
+
+    def remove_warning(
+        self,
+        guild_id: str,
+        warning_id: int,
+        removed_by: str,
+        removed_by_name: str,
+    ) -> dict[str, object] | None:
+        """Mark an active warning as removed while retaining its audit trail."""
+        removed_at = utc_now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE warnings SET removed_at = ?, removed_by = ?, removed_by_name = ? "
+                "WHERE guild_id = ? AND warning_id = ? AND removed_at IS NULL",
+                (removed_at, str(removed_by), str(removed_by_name), str(guild_id), int(warning_id)),
+            )
+            if cursor.rowcount == 0:
+                return None
+        self._invalidate_cache()
+        return self.warning(str(guild_id), int(warning_id))
+
     def queue_command(self, guild_id: str, channel_id: str, command_name: str, user_id: str, payload: dict[str, object] | None = None) -> str:
         request_id = uuid.uuid4().hex
         with self._connect() as connection:
@@ -1638,6 +2027,69 @@ class BirdBotStore:
                 (request_id, guild_id, channel_id, command_name, user_id, json.dumps(payload or {}), utc_now()),
             )
         return request_id
+
+    def auto_reacts(self, guild_id: str) -> list[dict[str, object]]:
+        """Return the independent auto-reaction rules for one server."""
+        guild_id = str(guild_id)
+        key = f"auto_reacts:{guild_id}"
+        cached = self._cache_get(key)
+        if cached is not self._CACHE_MISS:
+            return cached  # type: ignore[return-value]
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT rule_id, guild_id, channel_id, emoji, enabled, updated_by, updated_at "
+                "FROM guild_auto_reacts WHERE guild_id = ? ORDER BY updated_at DESC, rule_id",
+                (guild_id,),
+            ).fetchall()
+        result = [
+            {
+                "rule_id": row["rule_id"],
+                "guild_id": row["guild_id"],
+                "channel_id": row["channel_id"],
+                "emoji": row["emoji"],
+                "enabled": bool(row["enabled"]),
+                "updated_by": row["updated_by"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+        return self._cache_set(key, result, ttl=5.0)  # type: ignore[return-value]
+
+    def save_auto_react(
+        self,
+        guild_id: str,
+        channel_id: str,
+        emoji: str,
+        enabled: bool = True,
+        updated_by: str | None = None,
+        rule_id: str | None = None,
+    ) -> dict[str, object]:
+        """Create or update one auto-reaction rule without touching others."""
+        guild_id = str(guild_id)
+        rule_id = str(rule_id or uuid.uuid4().hex)
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO guild_auto_reacts (rule_id, guild_id, channel_id, emoji, enabled, updated_by, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(rule_id) DO UPDATE SET guild_id=excluded.guild_id, "
+                "channel_id=excluded.channel_id, emoji=excluded.emoji, enabled=excluded.enabled, "
+                "updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+                (rule_id, guild_id, str(channel_id), str(emoji), int(bool(enabled)), str(updated_by) if updated_by else None, now),
+            )
+        self._invalidate_cache()
+        return next(rule for rule in self.auto_reacts(guild_id) if rule["rule_id"] == rule_id)
+
+    def delete_auto_react(self, guild_id: str, rule_id: str) -> bool:
+        """Delete one auto-reaction rule only when it belongs to this server."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM guild_auto_reacts WHERE guild_id = ? AND rule_id = ?",
+                (str(guild_id), str(rule_id)),
+            )
+        if cursor.rowcount:
+            self._invalidate_cache()
+            return True
+        return False
 
     def claim_pending_commands(self, limit: int = 10) -> list[dict[str, str]]:
         with self._connect() as connection:
@@ -1654,21 +2106,38 @@ class BirdBotStore:
                 )
         return [{**dict(row), "payload": json.loads(row["payload"])} for row in rows]
 
-    def complete_command(self, request_id: str, error: str | None = None) -> None:
+    def complete_command(self, request_id: str, error: str | None = None, result: object | None = None) -> None:
+        encoded_result = None
+        if result is not None:
+            try:
+                encoded_result = json.dumps(result, ensure_ascii=False)
+            except (TypeError, ValueError):
+                encoded_result = json.dumps({"message": str(result)}, ensure_ascii=False)
         with self._connect() as connection:
             connection.execute(
-                "UPDATE command_requests SET status = ?, error = ?, completed_at = ? WHERE request_id = ?",
-                ("failed" if error else "complete", error, utc_now(), request_id),
+                "UPDATE command_requests SET status = ?, error = ?, result = ?, completed_at = ? WHERE request_id = ?",
+                ("failed" if error else "complete", error, encoded_result, utc_now(), request_id),
             )
 
     def command_request_for_user(self, request_id: str, user_id: str) -> dict[str, object] | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT request_id, guild_id, channel_id, command_name, status, error FROM command_requests "
+                "SELECT request_id, guild_id, channel_id, command_name, status, error, result FROM command_requests "
                 "WHERE request_id = ? AND requested_by = ?",
                 (request_id, user_id),
             ).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        result = dict(row)
+        raw_result = result.get("result")
+        if isinstance(raw_result, str) and raw_result:
+            try:
+                result["result"] = json.loads(raw_result)
+            except (TypeError, ValueError):
+                result["result"] = {"message": raw_result}
+        else:
+            result["result"] = None
+        return result
 
     def sync_bans(self, guild_id: str, bans: Iterable[object]) -> None:
         records = [
