@@ -208,6 +208,24 @@ DEFAULT_COMMAND_MESSAGES: dict[str, dict[str, dict[str, str]]] = {
             "no_reason": "لم يتم تقديم سبب.",
         },
     },
+    "mute": {
+        "en": {
+            "success": "Server-muted {member} in voice.",
+            "permission": "You need the Mute Members permission to use mute.",
+            "dashboard_permission": "BirdBot needs the Mute Members permission to server-mute members.",
+            "missing_member": "Choose a member first.",
+            "not_in_voice": "That member must be in a voice channel.",
+            "no_reason": "No reason provided.",
+        },
+        "ar": {
+            "success": "تم كتم صوت {member} في القناة الصوتية.",
+            "permission": "تحتاج إلى صلاحية كتم أعضاء لاستخدام هذا الأمر.",
+            "dashboard_permission": "يحتاج BirdBot إلى صلاحية كتم أعضاء لكتم الأعضاء صوتياً.",
+            "missing_member": "اختر عضواً أولاً.",
+            "not_in_voice": "يجب أن يكون العضو في قناة صوتية.",
+            "no_reason": "لم يتم تقديم سبب.",
+        },
+    },
     "lock": {
         "en": {
             "success": "This channel is now locked.",
@@ -261,6 +279,24 @@ DEFAULT_COMMAND_MESSAGES: dict[str, dict[str, dict[str, str]]] = {
     "unban": {
         "en": {"success": "{member} was unbanned."},
         "ar": {"success": "تم إلغاء حظر {member}."},
+    },
+    "music": {
+        "en": {
+            "playing": "Now playing **{track}**.",
+            "queued": "Queued **{track}** (position {position}).",
+            "paused": "Playback paused.",
+            "stopped": "Music stopped and the queue was cleared.",
+            "skipped": "Skipped. Now playing **{track}**.",
+            "queue_empty": "Skipped. The queue is empty.",
+        },
+        "ar": {
+            "playing": "يتم التشغيل الآن **{track}**.",
+            "queued": "تمت إضافة **{track}** إلى قائمة الانتظار (الموضع {position}).",
+            "paused": "تم إيقاف التشغيل مؤقتًا.",
+            "stopped": "تم إيقاف الموسيقى ومسح قائمة الانتظار.",
+            "skipped": "تم التخطي. يتم التشغيل الآن **{track}**.",
+            "queue_empty": "تم التخطي. قائمة الانتظار فارغة.",
+        },
     },
 }
 

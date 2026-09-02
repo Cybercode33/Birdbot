@@ -45,6 +45,10 @@ services:
         value: "0"
       - key: SPOTIFY_PREMIUM_USER_IDS
         sync: false
+      - key: VC_PREMIUM_REQUIRED
+        value: "0"
+      - key: VC_PREMIUM_USER_IDS
+        sync: false
       - key: DASHBOARD_PUBLIC_URL
         sync: false
       - key: FFMPEG_PATH
@@ -52,6 +56,18 @@ services:
       - key: YTDLP_COOKIES_FILE
         sync: false
       - key: YTDLP_JS_RUNTIME_PATH
+        sync: false
+      # Optional voice-presence bots. Tokens remain private Render secrets;
+      # the dashboard only exposes each bot's online/voice status.
+      - key: VC_BOT_1_TOKEN
+        sync: false
+      - key: VC_BOT_2_TOKEN
+        sync: false
+      - key: VC_BOT_3_TOKEN
+        sync: false
+      - key: VC_BOT_4_TOKEN
+        sync: false
+      - key: VC_BOT_5_TOKEN
         sync: false
       - key: SPY_JOIN_EMOJI
         sync: false

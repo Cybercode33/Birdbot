@@ -26,6 +26,18 @@
     return wrapper;
   }
 
+  function configSection(kicker, title, copy) {
+    const section = element("section", "ticket-config-section");
+    const heading = element("div", "ticket-section-heading");
+    heading.append(
+      element("span", "ticket-section-kicker", kicker),
+      element("h4", "ticket-section-title", title),
+      element("p", "ticket-section-copy", copy),
+    );
+    section.append(heading);
+    return section;
+  }
+
   function optionTemplate(index = 0) {
     return { label: "", value: "", description: "", emoji: "", button_style: defaultButtonStyle(index) };
   }
@@ -97,14 +109,18 @@
   async function mount({ root, guildId, requestJson, beginLoading, endLoading }) {
     root.replaceChildren();
     const panel = element("section", "ticket-config-panel");
-    panel.append(
+    const panelHeader = element("div", "ticket-panel-header");
+    const panelHeaderCopy = element("div", "ticket-panel-header-copy");
+    panelHeaderCopy.append(
       element("div", "ticket-panel-kicker", "Ticket setup"),
       element("h3", "ticket-panel-title", "Configure your ticket panel"),
-      element("p", "ticket-panel-copy", "Choose where the panel is posted, where ticket channels are created, and what users can request."),
+      element("p", "ticket-panel-copy", "Build a clear support flow, choose where tickets live, and preview the member experience before posting."),
     );
+    panelHeader.append(panelHeaderCopy, element("span", "ticket-config-state", "Ready to configure"));
+    panel.append(panelHeader);
     const status = element("p", "ticket-status");
     status.setAttribute("role", "status");
-    const form = element("form", "ticket-form");
+    const form = element("form", "ticket-form ticket-config-form");
     form.noValidate = true;
     const setupChannel = element("select", "ticket-input");
     const category = element("select", "ticket-input");
@@ -183,26 +199,42 @@
     post.type = "button";
     const actions = element("div", "ticket-actions");
     actions.append(save, post);
-    form.append(
+    const basicSection = configSection("01 · Basics", "Where should tickets start?", "Choose the setup channel, ticket category, and the layout members will use to open a ticket.");
+    basicSection.append(
       field("Ticket panel channel", setupChannel),
       field("Ticket channel category", category),
-      field("Priority level", priority),
-      field("Maximum open tickets per user", maxOpenTickets),
-      element("p", "ticket-help", "Limit how many open or claimed tickets each member can have at once. Closed tickets do not count."),
       layoutField,
       layoutHelp,
-      preview,
-      field("Select Ticket Logs Channel", logChannel),
-      field("Select support role(s)", rolePicker),
-      element("p", "ticket-help ticket-role-help", "Click a role to add or remove it from the support team."),
-      field("Description prompt", descriptionPrompt),
-      field("Custom Panel Icon", iconControl),
-      customIconStatus,
+    );
+    const behaviorSection = configSection("02 · Behavior", "How should tickets behave?", "Set priority defaults, per-member limits, and the information members provide when opening a ticket.");
+    behaviorSection.append(
+      field("Priority level", priority),
+      field("Maximum open tickets per user", maxOpenTickets),
+      element("p", "ticket-help", "Closed tickets do not count toward this limit."),
       descriptionToggle,
-      element("div", "ticket-options-header", "Ticket options"),
-      element("p", "ticket-help", "Add up to 25 options. Each option needs a unique value/ID."),
-      optionsContainer,
-      addOption,
+      field("Description prompt", descriptionPrompt),
+    );
+    const supportSection = configSection("03 · Support", "Who should receive ticket alerts?", "Send ticket activity to a dedicated log channel and choose the roles that can help members.");
+    supportSection.append(
+      field("Ticket logs channel", logChannel),
+      field("Support role(s)", rolePicker),
+      element("p", "ticket-help ticket-role-help", "Click a role to add or remove it from the support team."),
+    );
+    const appearanceSection = configSection("04 · Appearance", "Make the panel feel like your server", "Add an optional custom icon. If you leave it empty, the server icon will be used.");
+    appearanceSection.append(field("Custom panel icon", iconControl), customIconStatus);
+    const optionsSection = configSection("05 · Options", "What can members ask for?", "Add up to 25 support topics. Each option needs a unique value/ID and can include help text and an emoji.");
+    const optionsHeading = element("div", "ticket-options-heading");
+    optionsHeading.append(element("strong", "", "Support topics"), element("span", "ticket-options-count", "1–25 options"));
+    optionsSection.append(optionsHeading, optionsContainer, addOption);
+    const previewSection = configSection("Preview", "Member view", "This preview updates as you edit the panel and shows how the controls will appear in Discord.");
+    previewSection.append(preview);
+    form.append(
+      basicSection,
+      behaviorSection,
+      supportSection,
+      appearanceSection,
+      optionsSection,
+      previewSection,
       actions,
     );
     panel.append(status, form);

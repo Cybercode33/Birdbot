@@ -37,3 +37,26 @@ SPOTIFY_PREMIUM_REQUIRED = os.getenv("SPOTIFY_PREMIUM_REQUIRED", "0").strip().ca
 SPOTIFY_PREMIUM_USER_IDS = frozenset(
     value.strip() for value in os.getenv("SPOTIFY_PREMIUM_USER_IDS", "").split(",") if value.strip()
 )
+
+# Optional manual premium gate for the VC presence control panel. Leave it
+# disabled until a billing provider or operator-managed allowlist is ready.
+VC_PREMIUM_REQUIRED = os.getenv("VC_PREMIUM_REQUIRED", "0").strip().casefold() in {"1", "true", "yes", "on"}
+VC_PREMIUM_USER_IDS = frozenset(
+    value.strip() for value in os.getenv("VC_PREMIUM_USER_IDS", "").split(",") if value.strip()
+)
+
+# Optional voice-presence clients.  These are intentionally read only from
+# private host environment secrets; the dashboard never accepts, stores, or
+# returns Discord bot tokens.  Empty slots are simply ignored.
+VC_BOT_SLOT_COUNT = 5
+VC_BOT_TOKEN_ENV_NAMES = tuple(f"VC_BOT_{index}_TOKEN" for index in range(1, VC_BOT_SLOT_COUNT + 1))
+VC_BOT_TOKENS = tuple((os.getenv(name) or "").strip() or None for name in VC_BOT_TOKEN_ENV_NAMES)
+
+
+def vc_bot_slot_configured(slot: int) -> bool:
+    """Return whether a safe, token-free VC slot is configured on this host."""
+    try:
+        index = int(slot)
+    except (TypeError, ValueError):
+        return False
+    return 1 <= index <= VC_BOT_SLOT_COUNT and bool(VC_BOT_TOKENS[index - 1])

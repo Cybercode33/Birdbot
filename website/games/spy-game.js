@@ -30,6 +30,19 @@
     wheelColors: ["#6B7280", "#9CA3AF", "#4B5563", "#374151", "#D1D5DB", "#818CF8", "#A78BFA"],
     turnTimerSeconds: 30,
   };
+  const DEFAULT_GUESS_NUMBER_GAME = {
+    id: "guess-number",
+    name: "Guess the Number",
+    theme: "#1f2937",
+    bannerPath: "/assets/games/spy_banner.svg",
+    iconPath: "/assets/games/spy_icon.svg",
+    minimumPlayers: 2,
+    maximumPlayers: 20,
+    numberMinimum: 1,
+    numberMaximum: 100,
+    enabled: true,
+    language: "en",
+  };
   // Icons8 CDN assets keep the controls lightweight while matching the rest
   // of the dashboard icon treatment.
   const ICONS8 = {
@@ -98,13 +111,17 @@
       payload.wheel_color = payload.wheel_colors[0];
       payload.turn_timer_seconds = Number(game?.turnTimerSeconds) || 30;
     }
+    if (game?.id === "guess-number") {
+      payload.number_minimum = Number.isInteger(Number(game?.numberMinimum)) ? Number(game.numberMinimum) : 1;
+      payload.number_maximum = Number.isInteger(Number(game?.numberMaximum)) ? Number(game.numberMaximum) : 100;
+    }
     return payload;
   }
 
   async function toggleGame(game, button) {
     if (!api || !game || button.disabled) return;
     const gameId = String(game.id || "").toLowerCase();
-    if (!["spy", "roulette"].includes(gameId)) return;
+    if (!["spy", "roulette", "guess-number"].includes(gameId)) return;
     const previous = game.enabled !== false;
     const next = !previous;
     button.disabled = true;
@@ -131,6 +148,10 @@
         game.wheelMode = saved.wheelMode || game.wheelMode;
         game.wheelColor = saved.wheelColor || game.wheelColor;
         game.wheelColors = Array.isArray(saved.wheelColors) ? saved.wheelColors : game.wheelColors;
+      }
+      if (gameId === "guess-number") {
+        game.numberMinimum = saved.numberMinimum ?? game.numberMinimum;
+        game.numberMaximum = saved.numberMaximum ?? game.numberMaximum;
       }
       renderCatalog(catalogGames);
     } catch (error) {
@@ -166,7 +187,7 @@
     );
     if (notice) heading.append(node("p", "form-error", notice));
     const grid = node("div", "games-catalog-grid");
-    (games.length ? games : [DEFAULT_GAME, DEFAULT_ROULETTE_GAME]).forEach((game) => {
+    (games.length ? games : [DEFAULT_GAME, DEFAULT_ROULETTE_GAME, DEFAULT_GUESS_NUMBER_GAME]).forEach((game) => {
       const card = node("article", "game-catalog-card");
       const gameId = String(game?.id || "").toLowerCase();
       card.append(renderImage(game.iconPath || DEFAULT_GAME.iconPath, "game-catalog-icon", ""));
@@ -175,7 +196,9 @@
         node("strong", "game-catalog-name", game.name || "Spy Game"),
         node("span", "game-catalog-description", gameId === "roulette"
           ? "A quick, fair wheel spin for your community."
-          : "A hidden-role game of questions, clues, and careful deception."),
+          : gameId === "guess-number"
+            ? "A turn-based number hunt with clues and sudden-death ties."
+            : "A hidden-role game of questions, clues, and careful deception."),
         node("span", "game-catalog-action", "View game details →"),
       );
       card.append(copy);
@@ -196,6 +219,20 @@
             return;
           }
           window.BirdBotRoulette.open({
+            root: mountedRoot,
+            guildId: mountedGuildId,
+            channels: availableChannels,
+            api,
+            catalogOptions: mountOptions,
+          });
+          return;
+        }
+        if (gameId === "guess-number") {
+          if (!window.BirdBotGuessNumber?.open) {
+            renderCatalog(catalogGames, "Guess the Number details could not be loaded. Refresh the page and try again.");
+            return;
+          }
+          window.BirdBotGuessNumber.open({
             root: mountedRoot,
             guildId: mountedGuildId,
             channels: availableChannels,
@@ -522,14 +559,14 @@
     availableChannels = Array.isArray(options.channels) ? options.channels : [];
     const currentApi = api;
     const guildId = mountedGuildId;
-    renderCatalog([DEFAULT_GAME, DEFAULT_ROULETTE_GAME]);
+    renderCatalog([DEFAULT_GAME, DEFAULT_ROULETTE_GAME, DEFAULT_GUESS_NUMBER_GAME]);
     currentApi.beginLoading("Loading games...", false);
     try {
       const result = await currentApi.requestJson(`/api/guilds/${encodeURIComponent(mountedGuildId)}/games`, { cache: "no-store" });
       if (mountedRoot && mountedGuildId === guildId && Array.isArray(result.games) && result.games.length) renderCatalog(result.games);
     } catch (error) {
       if (mountedRoot && mountedGuildId === guildId) {
-        renderCatalog([DEFAULT_GAME, DEFAULT_ROULETTE_GAME], error instanceof Error ? error.message : "Games could not be loaded. Try again.");
+        renderCatalog([DEFAULT_GAME, DEFAULT_ROULETTE_GAME, DEFAULT_GUESS_NUMBER_GAME], error instanceof Error ? error.message : "Games could not be loaded. Try again.");
       }
     } finally {
       currentApi.endLoading(false);
@@ -538,6 +575,7 @@
 
   function unmount() {
     if (window.BirdBotRoulette?.unmount) window.BirdBotRoulette.unmount();
+    if (window.BirdBotGuessNumber?.unmount) window.BirdBotGuessNumber.unmount();
     if (mountedRoot) mountedRoot.replaceChildren();
     mountedRoot = null;
     mountedGuildId = null;

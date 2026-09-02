@@ -31,9 +31,18 @@ DASHBOARD_COMMAND_NAMES = (
     "unwarning",
     "show_warning",
     "timeout",
+    "mute",
     "lock",
     "unlock",
     "delete",
+    # Music commands are managed from the same Commands tab as moderation
+    # commands.  The Discord Music cog exposes matching slash/prefix command
+    # names, so enable/disable, language, and shortcut settings stay in sync.
+    "play",
+    "q",
+    "pause",
+    "skip",
+    "stop",
 )
 
 # General server activity is grouped into dashboard-controlled streams.
@@ -66,6 +75,8 @@ LOG_EVENT_CATEGORIES = {
     "moderation_warning": "moderation",
     "moderation_unwarning": "moderation",
     "moderation_timeout": "moderation",
+    "moderation_mute": "moderation",
+    "moderation_automod": "moderation",
 }
 
 
@@ -232,6 +243,19 @@ class BirdBotStore:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS bot_voice_channels (
+                    channel_id TEXT PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    category_id TEXT,
+                    category_name TEXT,
+                    user_limit INTEGER NOT NULL DEFAULT 0,
+                    last_seen_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS bot_categories (
                     category_id TEXT PRIMARY KEY,
                     guild_id TEXT NOT NULL,
@@ -281,6 +305,70 @@ class BirdBotStore:
                     enabled INTEGER NOT NULL DEFAULT 1,
                     updated_by TEXT,
                     updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS automod_configs (
+                    guild_id TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    anti_link_enabled INTEGER NOT NULL DEFAULT 0,
+                    anti_spam_enabled INTEGER NOT NULL DEFAULT 0,
+                    banned_words_enabled INTEGER NOT NULL DEFAULT 0,
+                    raid_protection_enabled INTEGER NOT NULL DEFAULT 0,
+                    auto_warning_enabled INTEGER NOT NULL DEFAULT 0,
+                    auto_timeout_enabled INTEGER NOT NULL DEFAULT 0,
+                    banned_words TEXT NOT NULL DEFAULT '[]',
+                    spam_message_limit INTEGER NOT NULL DEFAULT 5,
+                    spam_window_seconds INTEGER NOT NULL DEFAULT 8,
+                    raid_join_limit INTEGER NOT NULL DEFAULT 8,
+                    raid_window_seconds INTEGER NOT NULL DEFAULT 10,
+                    auto_timeout_minutes INTEGER NOT NULL DEFAULT 10,
+                    updated_by TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS temp_vc_configs (
+                    guild_id TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    lobby_channel_id TEXT,
+                    category_id TEXT,
+                    channel_name_template TEXT NOT NULL DEFAULT '{owner}''s room',
+                    user_limit INTEGER NOT NULL DEFAULT 0,
+                    updated_by TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS temp_vc_channels (
+                    channel_id TEXT PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    owner_name TEXT,
+                    channel_name TEXT,
+                    locked INTEGER NOT NULL DEFAULT 0,
+                    blocked_user_ids TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vc_presence_configs (
+                    guild_id TEXT NOT NULL,
+                    slot INTEGER NOT NULL,
+                    channel_id TEXT,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    updated_by TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, slot)
                 )
                 """
             )
@@ -486,6 +574,20 @@ class BirdBotStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS guess_number_game_configs (
+                    guild_id TEXT PRIMARY KEY,
+                    min_players INTEGER NOT NULL DEFAULT 2,
+                    max_players INTEGER NOT NULL DEFAULT 20,
+                    number_min INTEGER NOT NULL DEFAULT 1,
+                    number_max INTEGER NOT NULL DEFAULT 100,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    language TEXT NOT NULL DEFAULT 'en',
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_guild_status ON tickets (guild_id, status)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_guild_created ON tickets (guild_id, created_at DESC)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tickets_guild_creator_status ON tickets (guild_id, creator_id, status)")
@@ -496,8 +598,12 @@ class BirdBotStore:
             connection.execute("CREATE INDEX IF NOT EXISTS idx_spy_game_logs_guild_match ON spy_game_logs (guild_id, match_at DESC, log_id DESC)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_spy_game_configs_updated ON spy_game_configs (updated_at DESC)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_roulette_game_configs_updated ON roulette_game_configs (updated_at DESC)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_guess_number_game_configs_updated ON guess_number_game_configs (updated_at DESC)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_bot_members_guild_status_name ON bot_members (guild_id, is_bot, display_name COLLATE NOCASE)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_bot_members_guild_member_id ON bot_members (guild_id, member_id)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_bot_voice_channels_guild_name ON bot_voice_channels (guild_id, name COLLATE NOCASE)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_temp_vc_channels_guild ON temp_vc_channels (guild_id, created_at DESC)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_vc_presence_slot_enabled ON vc_presence_configs (slot, enabled, guild_id)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_command_requests_pending ON command_requests (status, created_at)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_guild_auto_reacts_channel ON guild_auto_reacts (guild_id, channel_id, enabled)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_warnings_member ON warnings (guild_id, member_id, warning_id DESC)")
@@ -569,6 +675,17 @@ class BirdBotStore:
             ):
                 if name not in roulette_config_columns:
                     connection.execute(f"ALTER TABLE roulette_game_configs ADD COLUMN {name} {definition}")
+            guess_number_config_columns = {row["name"] for row in connection.execute("PRAGMA table_info(guess_number_game_configs)")}
+            for name, definition in (
+                ("min_players", "INTEGER NOT NULL DEFAULT 2"),
+                ("max_players", "INTEGER NOT NULL DEFAULT 20"),
+                ("number_min", "INTEGER NOT NULL DEFAULT 1"),
+                ("number_max", "INTEGER NOT NULL DEFAULT 100"),
+                ("enabled", "INTEGER NOT NULL DEFAULT 1"),
+                ("language", "TEXT NOT NULL DEFAULT 'en'"),
+            ):
+                if name not in guess_number_config_columns:
+                    connection.execute(f"ALTER TABLE guess_number_game_configs ADD COLUMN {name} {definition}")
             ticket_record_columns = {row["name"] for row in connection.execute("PRAGMA table_info(tickets)")}
             if "channel_name" not in ticket_record_columns:
                 connection.execute("ALTER TABLE tickets ADD COLUMN channel_name TEXT NOT NULL DEFAULT ''")
@@ -645,6 +762,21 @@ class BirdBotStore:
             for guild in guilds
             for category in getattr(guild, "categories", [])
         ]
+        voice_channel_records = [
+            (
+                str(channel.id),
+                str(guild.id),
+                channel.name,
+                str(channel.category.id) if getattr(channel, "category", None) else None,
+                channel.category.name if getattr(channel, "category", None) else None,
+                int(getattr(channel, "user_limit", 0) or 0),
+                now,
+            )
+            for guild in guilds
+            for channel in getattr(guild, "voice_channels", [])
+            if getattr(guild, "me", None)
+            and channel.permissions_for(guild.me).view_channel
+        ]
         role_records = [
             (
                 str(role.id),
@@ -670,6 +802,7 @@ class BirdBotStore:
         with self._connect() as connection:
             connection.execute("DELETE FROM bot_guilds")
             connection.execute("DELETE FROM bot_channels")
+            connection.execute("DELETE FROM bot_voice_channels")
             connection.execute("DELETE FROM bot_categories")
             connection.execute("DELETE FROM bot_roles")
             connection.executemany(
@@ -679,6 +812,10 @@ class BirdBotStore:
             connection.executemany(
                 "INSERT INTO bot_channels (channel_id, guild_id, name, last_seen_at) VALUES (?, ?, ?, ?)",
                 channel_records,
+            )
+            connection.executemany(
+                "INSERT INTO bot_voice_channels (channel_id, guild_id, name, category_id, category_name, user_limit, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                voice_channel_records,
             )
             connection.executemany(
                 "INSERT INTO bot_categories (category_id, guild_id, name, last_seen_at) VALUES (?, ?, ?, ?)",
@@ -943,6 +1080,284 @@ class BirdBotStore:
                 (guild_id,),
             ).fetchall()
         return self._cache_set(key, [{"id": row["channel_id"], "name": row["name"]} for row in rows], ttl=20.0)  # type: ignore[return-value]
+
+    def bot_voice_channels(self, guild_id: str) -> list[dict[str, object]]:
+        key = f"bot_voice_channels:{guild_id}"
+        cached = self._cache_get(key)
+        if cached is not self._CACHE_MISS:
+            return cached  # type: ignore[return-value]
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT channel_id, name, category_id, category_name, user_limit FROM bot_voice_channels "
+                "WHERE guild_id = ? ORDER BY lower(name)",
+                (str(guild_id),),
+            ).fetchall()
+        result = [
+            {
+                "id": row["channel_id"],
+                "name": row["name"],
+                "category_id": row["category_id"],
+                "category_name": row["category_name"],
+                "user_limit": int(row["user_limit"] or 0),
+            }
+            for row in rows
+        ]
+        return self._cache_set(key, result, ttl=20.0)  # type: ignore[return-value]
+
+    @staticmethod
+    def _vc_presence_default(guild_id: str, slot: int) -> dict[str, object]:
+        return {
+            "guild_id": str(guild_id),
+            "slot": int(slot),
+            "channel_id": None,
+            "enabled": False,
+            "updated_by": None,
+            "updated_at": None,
+        }
+
+    def vc_presence_configs(self, guild_id: str, slot_count: int = 5) -> list[dict[str, object]]:
+        """Return one safe placement row for each optional presence slot."""
+        guild_id = str(guild_id)
+        slot_count = max(1, int(slot_count))
+        key = f"vc_presence_configs:{guild_id}:{slot_count}"
+        cached = self._cache_get(key)
+        if cached is not self._CACHE_MISS:
+            return cached  # type: ignore[return-value]
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT guild_id, slot, channel_id, enabled, updated_by, updated_at "
+                "FROM vc_presence_configs WHERE guild_id = ? ORDER BY slot",
+                (guild_id,),
+            ).fetchall()
+        by_slot = {int(row["slot"]): dict(row) for row in rows}
+        result: list[dict[str, object]] = []
+        for slot in range(1, slot_count + 1):
+            row = by_slot.get(slot) or self._vc_presence_default(guild_id, slot)
+            result.append(
+                {
+                    "guild_id": str(row.get("guild_id") or guild_id),
+                    "slot": slot,
+                    "channel_id": str(row["channel_id"]) if row.get("channel_id") else None,
+                    "enabled": bool(row.get("enabled")),
+                    "updated_by": row.get("updated_by"),
+                    "updated_at": row.get("updated_at"),
+                }
+            )
+        return self._cache_set(key, result, ttl=5.0)  # type: ignore[return-value]
+
+    def vc_presence_config(self, guild_id: str, slot: int) -> dict[str, object]:
+        slot = int(slot)
+        rows = self.vc_presence_configs(guild_id, max(5, slot))
+        return next((row for row in rows if int(row["slot"]) == slot), self._vc_presence_default(guild_id, slot))
+
+    def vc_presence_configs_for_slot(self, slot: int) -> list[dict[str, object]]:
+        """Find saved enabled placements for one host-configured bot slot."""
+        slot = int(slot)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT guild_id, slot, channel_id, enabled, updated_by, updated_at "
+                "FROM vc_presence_configs WHERE slot = ? AND enabled = 1 AND channel_id IS NOT NULL",
+                (slot,),
+            ).fetchall()
+        return [
+            {
+                "guild_id": row["guild_id"],
+                "slot": int(row["slot"]),
+                "channel_id": str(row["channel_id"]),
+                "enabled": True,
+                "updated_by": row["updated_by"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def save_vc_presence_config(
+        self,
+        guild_id: str,
+        slot: int,
+        *,
+        channel_id: str | None,
+        enabled: bool,
+        updated_by: str | None = None,
+    ) -> dict[str, object]:
+        guild_id = str(guild_id)
+        slot = int(slot)
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO vc_presence_configs (guild_id, slot, channel_id, enabled, updated_by, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(guild_id, slot) DO UPDATE SET "
+                "channel_id=excluded.channel_id, enabled=excluded.enabled, updated_by=excluded.updated_by, "
+                "updated_at=excluded.updated_at",
+                (guild_id, slot, str(channel_id) if channel_id else None, int(bool(enabled)), str(updated_by) if updated_by else None, utc_now()),
+            )
+        self._invalidate_cache()
+        return self.vc_presence_config(guild_id, slot)
+
+    @staticmethod
+    def _temp_vc_config_defaults(guild_id: str) -> dict[str, object]:
+        return {
+            "guild_id": str(guild_id),
+            "enabled": False,
+            "lobby_channel_id": None,
+            "category_id": None,
+            "channel_name_template": "{owner}'s room",
+            "user_limit": 0,
+            "updated_by": None,
+            "updated_at": None,
+        }
+
+    def temp_vc_config(self, guild_id: str) -> dict[str, object]:
+        guild_id = str(guild_id)
+        key = f"temp_vc_config:{guild_id}"
+        cached = self._cache_get(key)
+        if cached is not self._CACHE_MISS:
+            return cached  # type: ignore[return-value]
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT guild_id, enabled, lobby_channel_id, category_id, channel_name_template, user_limit, updated_by, updated_at "
+                "FROM temp_vc_configs WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+        if not row:
+            return self._cache_set(key, self._temp_vc_config_defaults(guild_id), ttl=5.0)  # type: ignore[return-value]
+        result = {
+            "guild_id": row["guild_id"],
+            "enabled": bool(row["enabled"]),
+            "lobby_channel_id": row["lobby_channel_id"],
+            "category_id": row["category_id"],
+            "channel_name_template": row["channel_name_template"] or "{owner}'s room",
+            "user_limit": int(row["user_limit"] or 0),
+            "updated_by": row["updated_by"],
+            "updated_at": row["updated_at"],
+        }
+        return self._cache_set(key, result, ttl=5.0)  # type: ignore[return-value]
+
+    def save_temp_vc_config(
+        self,
+        guild_id: str,
+        *,
+        enabled: bool,
+        lobby_channel_id: str | None,
+        category_id: str | None,
+        channel_name_template: str,
+        user_limit: int,
+        updated_by: str | None = None,
+    ) -> dict[str, object]:
+        guild_id = str(guild_id)
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO temp_vc_configs (guild_id, enabled, lobby_channel_id, category_id, channel_name_template, user_limit, updated_by, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled, "
+                "lobby_channel_id=excluded.lobby_channel_id, category_id=excluded.category_id, "
+                "channel_name_template=excluded.channel_name_template, user_limit=excluded.user_limit, "
+                "updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+                (
+                    guild_id,
+                    int(bool(enabled)),
+                    str(lobby_channel_id) if lobby_channel_id else None,
+                    str(category_id) if category_id else None,
+                    str(channel_name_template),
+                    int(user_limit),
+                    str(updated_by) if updated_by else None,
+                    now,
+                ),
+            )
+        self._invalidate_cache()
+        return self.temp_vc_config(guild_id)
+
+    def temp_vc_channels(self, guild_id: str) -> list[dict[str, object]]:
+        guild_id = str(guild_id)
+        key = f"temp_vc_channels:{guild_id}"
+        cached = self._cache_get(key)
+        if cached is not self._CACHE_MISS:
+            return cached  # type: ignore[return-value]
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT channel_id, guild_id, owner_id, owner_name, channel_name, locked, blocked_user_ids, created_at, updated_at "
+                "FROM temp_vc_channels WHERE guild_id = ? ORDER BY created_at DESC",
+                (guild_id,),
+            ).fetchall()
+        result: list[dict[str, object]] = []
+        for row in rows:
+            try:
+                blocked = json.loads(row["blocked_user_ids"] or "[]")
+            except (TypeError, ValueError):
+                blocked = []
+            result.append(
+                {
+                    "channel_id": row["channel_id"],
+                    "guild_id": row["guild_id"],
+                    "owner_id": row["owner_id"],
+                    "owner_name": row["owner_name"],
+                    "channel_name": row["channel_name"],
+                    "locked": bool(row["locked"]),
+                    "blocked_user_ids": [str(value) for value in blocked if str(value).isdigit()],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return self._cache_set(key, result, ttl=5.0)  # type: ignore[return-value]
+
+    def temp_vc_channel(self, guild_id: str, channel_id: str) -> dict[str, object] | None:
+        return next((item for item in self.temp_vc_channels(guild_id) if str(item["channel_id"]) == str(channel_id)), None)
+
+    def save_temp_vc_channel(
+        self,
+        guild_id: str,
+        channel_id: str,
+        owner_id: str,
+        owner_name: str | None,
+        channel_name: str | None,
+        *,
+        locked: bool = False,
+        blocked_user_ids: list[str] | None = None,
+    ) -> dict[str, object]:
+        now = utc_now()
+        existing = self.temp_vc_channel(str(guild_id), str(channel_id))
+        created_at = str(existing.get("created_at")) if existing and existing.get("created_at") else now
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO temp_vc_channels (channel_id, guild_id, owner_id, owner_name, channel_name, locked, blocked_user_ids, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(channel_id) DO UPDATE SET guild_id=excluded.guild_id, "
+                "owner_id=excluded.owner_id, owner_name=excluded.owner_name, channel_name=excluded.channel_name, "
+                "locked=excluded.locked, blocked_user_ids=excluded.blocked_user_ids, updated_at=excluded.updated_at",
+                (
+                    str(channel_id), str(guild_id), str(owner_id), owner_name, channel_name,
+                    int(bool(locked)), json.dumps([str(value) for value in (blocked_user_ids or [])]), created_at, now,
+                ),
+            )
+        self._invalidate_cache()
+        return self.temp_vc_channel(str(guild_id), str(channel_id)) or {}
+
+    def update_temp_vc_channel(self, guild_id: str, channel_id: str, **changes: object) -> dict[str, object] | None:
+        current = self.temp_vc_channel(guild_id, channel_id)
+        if not current:
+            return None
+        owner_id = str(changes.get("owner_id") or current.get("owner_id") or "")
+        blocked = changes.get("blocked_user_ids")
+        if not isinstance(blocked, list):
+            blocked = current.get("blocked_user_ids") if isinstance(current.get("blocked_user_ids"), list) else []
+        return self.save_temp_vc_channel(
+            guild_id,
+            channel_id,
+            owner_id,
+            str(changes.get("owner_name") or current.get("owner_name") or ""),
+            str(changes.get("channel_name") or current.get("channel_name") or ""),
+            locked=bool(changes.get("locked", current.get("locked", False))),
+            blocked_user_ids=[str(value) for value in blocked],
+        )
+
+    def delete_temp_vc_channel(self, guild_id: str, channel_id: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM temp_vc_channels WHERE guild_id = ? AND channel_id = ?",
+                (str(guild_id), str(channel_id)),
+            )
+        if cursor.rowcount:
+            self._invalidate_cache()
+            return True
+        return False
 
     def log_config(self, guild_id: str) -> dict[str, object]:
         """Return the per-server audit log destination and enabled streams."""
@@ -1683,6 +2098,94 @@ class BirdBotStore:
             "language": final_language,
         }
 
+    def guess_number_game_config(self, guild_id: str) -> dict[str, object]:
+        """Return the persisted Guess the Number settings for a guild."""
+        defaults: dict[str, object] = {
+            "min_players": 2,
+            "max_players": 20,
+            "number_min": 1,
+            "number_max": 100,
+            "enabled": True,
+            "language": "en",
+        }
+        key = f"guess_number_game_config:{guild_id}"
+        cached = self._cache_get(key)
+        if cached is not self._CACHE_MISS:
+            return dict(cached)  # type: ignore[arg-type]
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT min_players, max_players, number_min, number_max, enabled, language "
+                "FROM guess_number_game_configs WHERE guild_id = ?",
+                (str(guild_id),),
+            ).fetchone()
+        if row is not None:
+            try:
+                minimum = max(2, min(50, int(row["min_players"])))
+                maximum = max(minimum, min(50, int(row["max_players"])))
+                number_minimum = int(row["number_min"])
+                number_maximum = int(row["number_max"])
+                if number_maximum <= number_minimum:
+                    raise ValueError
+                language = str(row["language"] or "en").lower()
+                defaults = {
+                    "min_players": minimum,
+                    "max_players": maximum,
+                    "number_min": max(-1_000_000, min(1_000_000, number_minimum)),
+                    "number_max": max(-1_000_000, min(1_000_000, number_maximum)),
+                    "enabled": bool(int(row["enabled"])),
+                    "language": language if language in {"en", "ar"} else "en",
+                }
+                if int(defaults["number_max"]) <= int(defaults["number_min"]):
+                    defaults["number_min"], defaults["number_max"] = 1, 100
+            except (TypeError, ValueError):
+                pass
+        return self._cache_set(key, defaults, ttl=20.0)  # type: ignore[return-value]
+
+    def save_guess_number_game_config(
+        self,
+        guild_id: str,
+        min_players: int,
+        max_players: int,
+        number_min: int,
+        number_max: int,
+        *,
+        enabled: bool | None = None,
+        language: str | None = None,
+    ) -> dict[str, object]:
+        """Persist validated Guess the Number settings."""
+        minimum = max(2, min(50, int(min_players)))
+        maximum = max(minimum, min(50, int(max_players)))
+        number_minimum = max(-1_000_000, min(1_000_000, int(number_min)))
+        number_maximum = max(-1_000_000, min(1_000_000, int(number_max)))
+        if number_maximum <= number_minimum:
+            raise ValueError("number_max must be greater than number_min")
+        current = self.guess_number_game_config(guild_id)
+        final_enabled = bool(current.get("enabled", True)) if enabled is None else bool(enabled)
+        final_language = language if language in {"en", "ar"} else str(current.get("language") or "en")
+        if final_language not in {"en", "ar"}:
+            final_language = "en"
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO guess_number_game_configs "
+                "(guild_id, min_players, max_players, number_min, number_max, enabled, language, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(guild_id) DO UPDATE SET "
+                "min_players = excluded.min_players, max_players = excluded.max_players, "
+                "number_min = excluded.number_min, number_max = excluded.number_max, "
+                "enabled = excluded.enabled, language = excluded.language, updated_at = excluded.updated_at",
+                (str(guild_id), minimum, maximum, number_minimum, number_maximum, int(final_enabled), final_language, now),
+            )
+        self._invalidate_cache()
+        return {
+            "min_players": minimum,
+            "max_players": maximum,
+            "number_min": number_minimum,
+            "number_max": number_maximum,
+            "enabled": final_enabled,
+            "language": final_language,
+        }
+
     def roulette_game_config(self, guild_id: str) -> dict[str, object]:
         """Return persisted Roulette lobby limits with safe defaults."""
         defaults: dict[str, object] = {
@@ -1857,14 +2360,22 @@ class BirdBotStore:
             )
         self._invalidate_cache()
 
-    def bot_members(self, guild_id: str, query: str = "", limit: int = 10_000) -> list[dict[str, object]]:
+    def bot_members(
+        self,
+        guild_id: str,
+        query: str = "",
+        limit: int = 10_000,
+        *,
+        include_bots: bool = False,
+    ) -> list[dict[str, object]]:
         normalized = query.strip()
-        key = f"bot_members:{guild_id}:{normalized.casefold()}:{int(limit)}"
+        key = f"bot_members:{guild_id}:{normalized.casefold()}:{int(limit)}:{int(include_bots)}"
         cached = self._cache_get(key)
         if cached is not self._CACHE_MISS:
             return cached  # type: ignore[return-value]
         with self._connect() as connection:
             member_columns = "member_id, display_name, username, global_name, avatar_url, joined_at, roles, role_ids, is_bot"
+            bot_filter = "" if include_bots else " AND is_bot = 0"
             if normalized:
                 # Keep search work in SQLite instead of decoding every role
                 # payload on every keystroke. Python filtering below remains a
@@ -1872,7 +2383,7 @@ class BirdBotStore:
                 needle = f"%{normalized}%"
                 rows = connection.execute(
                     f"SELECT {member_columns} FROM bot_members "
-                    "WHERE guild_id = ? AND is_bot = 0 AND ("
+                    f"WHERE guild_id = ?{bot_filter} AND ("
                     "display_name LIKE ? COLLATE NOCASE OR username LIKE ? COLLATE NOCASE OR "
                     "global_name LIKE ? COLLATE NOCASE OR member_id LIKE ? COLLATE NOCASE) "
                     "ORDER BY display_name COLLATE NOCASE LIMIT ?",
@@ -1884,14 +2395,14 @@ class BirdBotStore:
                 # dashboard never reports a false "no matching user" result.
                 if not rows:
                     rows = connection.execute(
-                        f"SELECT {member_columns} FROM bot_members WHERE guild_id = ? AND is_bot = 0 "
+                        f"SELECT {member_columns} FROM bot_members WHERE guild_id = ?{bot_filter} "
                         "ORDER BY display_name COLLATE NOCASE",
                         (guild_id,),
                     ).fetchall()
             else:
                 rows = connection.execute(
                     f"SELECT {member_columns} FROM bot_members "
-                    "WHERE guild_id = ? AND is_bot = 0 ORDER BY display_name COLLATE NOCASE LIMIT ?",
+                    f"WHERE guild_id = ?{bot_filter} ORDER BY display_name COLLATE NOCASE LIMIT ?",
                     (guild_id, max(1, min(int(limit), 10_000))),
                 ).fetchall()
         members = [
@@ -2054,6 +2565,124 @@ class BirdBotStore:
             for row in rows
         ]
         return self._cache_set(key, result, ttl=5.0)  # type: ignore[return-value]
+
+    @staticmethod
+    def _default_automod_config(guild_id: str) -> dict[str, object]:
+        return {
+            "guild_id": str(guild_id),
+            "enabled": False,
+            "anti_link": False,
+            "anti_spam": False,
+            "banned_words": False,
+            "raid_protection": False,
+            "auto_warning": False,
+            "auto_timeout": False,
+            "banned_words_list": [],
+            "spam_message_limit": 5,
+            "spam_window_seconds": 8,
+            "raid_join_limit": 8,
+            "raid_window_seconds": 10,
+            "auto_timeout_minutes": 10,
+            "updated_by": None,
+            "updated_at": None,
+        }
+
+    def automod_config(self, guild_id: str) -> dict[str, object]:
+        """Return one server's Automod settings with safe disabled defaults."""
+        guild_id = str(guild_id)
+        key = f"automod_config:{guild_id}"
+        cached = self._cache_get(key)
+        if cached is not self._CACHE_MISS:
+            return dict(cached)  # type: ignore[arg-type]
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM automod_configs WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+        if row is None:
+            return self._cache_set(key, self._default_automod_config(guild_id), ttl=5.0)  # type: ignore[return-value]
+        try:
+            raw_words = json.loads(row["banned_words"] or "[]")
+        except (TypeError, ValueError):
+            raw_words = []
+        words = [str(word) for word in raw_words] if isinstance(raw_words, list) else []
+        result = {
+            "guild_id": guild_id,
+            "enabled": bool(row["enabled"]),
+            "anti_link": bool(row["anti_link_enabled"]),
+            "anti_spam": bool(row["anti_spam_enabled"]),
+            "banned_words": bool(row["banned_words_enabled"]),
+            "raid_protection": bool(row["raid_protection_enabled"]),
+            "auto_warning": bool(row["auto_warning_enabled"]),
+            "auto_timeout": bool(row["auto_timeout_enabled"]),
+            "banned_words_list": words,
+            "spam_message_limit": int(row["spam_message_limit"]),
+            "spam_window_seconds": int(row["spam_window_seconds"]),
+            "raid_join_limit": int(row["raid_join_limit"]),
+            "raid_window_seconds": int(row["raid_window_seconds"]),
+            "auto_timeout_minutes": int(row["auto_timeout_minutes"]),
+            "updated_by": row["updated_by"],
+            "updated_at": row["updated_at"],
+        }
+        return self._cache_set(key, result, ttl=5.0)  # type: ignore[return-value]
+
+    def save_automod_config(self, guild_id: str, *, updated_by: str | None = None, **settings: object) -> dict[str, object]:
+        """Persist the normalized Automod settings for one server."""
+        guild_id = str(guild_id)
+        current = self.automod_config(guild_id)
+        values = {**current, **settings}
+        words = values.get("banned_words_list", [])
+        if not isinstance(words, list):
+            words = []
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO automod_configs (
+                    guild_id, enabled, anti_link_enabled, anti_spam_enabled,
+                    banned_words_enabled, raid_protection_enabled,
+                    auto_warning_enabled, auto_timeout_enabled, banned_words,
+                    spam_message_limit, spam_window_seconds, raid_join_limit,
+                    raid_window_seconds, auto_timeout_minutes, updated_by, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    enabled=excluded.enabled,
+                    anti_link_enabled=excluded.anti_link_enabled,
+                    anti_spam_enabled=excluded.anti_spam_enabled,
+                    banned_words_enabled=excluded.banned_words_enabled,
+                    raid_protection_enabled=excluded.raid_protection_enabled,
+                    auto_warning_enabled=excluded.auto_warning_enabled,
+                    auto_timeout_enabled=excluded.auto_timeout_enabled,
+                    banned_words=excluded.banned_words,
+                    spam_message_limit=excluded.spam_message_limit,
+                    spam_window_seconds=excluded.spam_window_seconds,
+                    raid_join_limit=excluded.raid_join_limit,
+                    raid_window_seconds=excluded.raid_window_seconds,
+                    auto_timeout_minutes=excluded.auto_timeout_minutes,
+                    updated_by=excluded.updated_by,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    guild_id,
+                    int(bool(values.get("enabled"))),
+                    int(bool(values.get("anti_link"))),
+                    int(bool(values.get("anti_spam"))),
+                    int(bool(values.get("banned_words"))),
+                    int(bool(values.get("raid_protection"))),
+                    int(bool(values.get("auto_warning"))),
+                    int(bool(values.get("auto_timeout"))),
+                    json.dumps(words, ensure_ascii=False),
+                    int(values.get("spam_message_limit", 5)),
+                    int(values.get("spam_window_seconds", 8)),
+                    int(values.get("raid_join_limit", 8)),
+                    int(values.get("raid_window_seconds", 10)),
+                    int(values.get("auto_timeout_minutes", 10)),
+                    str(updated_by) if updated_by else None,
+                    now,
+                ),
+            )
+        self._invalidate_cache()
+        return self.automod_config(guild_id)
 
     def save_auto_react(
         self,

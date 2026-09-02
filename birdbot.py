@@ -13,8 +13,9 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from command_messages import command_message
-from settings import COMMAND_PREFIX, GUILD_ID
+from settings import COMMAND_PREFIX, GUILD_ID, VC_BOT_TOKENS
 from storage import DASHBOARD_COMMAND_NAMES, store
+from vc_presence import VCPresenceManager
 
 
 DEFAULT_PRESENCES: list[tuple[discord.ActivityType, str]] = [
@@ -100,6 +101,9 @@ class EyooBot(commands.Bot):
         self.presence_status = PRESENCE_STATUS
         self.started_at: datetime | None = None
         self.members_loaded = False
+        # Optional secondary voice-presence clients use private host secrets
+        # and never expose their tokens to the dashboard or shared storage.
+        self.vc_presence = VCPresenceManager(VC_BOT_TOKENS, store)
         self.rotate_presence.change_interval(minutes=PRESENCE_INTERVAL_MINUTES)
 
     @staticmethod
@@ -172,9 +176,11 @@ class EyooBot(commands.Bot):
         # reads persisted results and never creates another bot connection.
         await self.load_extension("games.spy.game")
         await self.load_extension("games.roulette.game")
+        await self.load_extension("games.guess_number.game")
         # Music is a cog on this same global client.  The dashboard only queues
         # actions; it never creates another Discord connection or bot process.
         await self.load_extension("music.cog")
+        await self.vc_presence.start()
         if GUILD_ID and GUILD_ID.isdigit():
             guild = discord.Object(id=int(GUILD_ID))
             self.tree.copy_global_to(guild=guild)
@@ -196,6 +202,7 @@ class EyooBot(commands.Bot):
         print(f"Logged in as {self.user} (ID: {self.user.id})")
         print(f"Prefix commands are ready. Default prefix: {COMMAND_PREFIX} (server settings may override it)")
         store.sync_bot_guilds(self.guilds)
+        await self.vc_presence.reconcile_all()
         if not self.members_loaded:
             await self.load_all_members()
             self.members_loaded = True
@@ -204,6 +211,8 @@ class EyooBot(commands.Bot):
         general = self.get_cog("General")
         if general and hasattr(general, "register_ticket_views"):
             await general.register_ticket_views()
+        if general and hasattr(general, "reconcile_temp_vcs"):
+            await general.reconcile_temp_vcs()
 
     async def on_guild_join(self, _: discord.Guild) -> None:
         store.sync_bot_guilds(self.guilds)
@@ -312,12 +321,28 @@ class EyooBot(commands.Bot):
                 if not guild:
                     raise ValueError("BirdBot is no longer a member of that server.")
                 command_name = str(request["command_name"])
-                if command_name.startswith("music_"):
+                if command_name == "vc_presence_action":
+                    await self.vc_presence.apply_action(int(guild.id), request.get("payload") or {})
+                    command_result = self.vc_presence.status_for_guild(str(guild.id))
+                elif command_name.startswith("music_"):
                     music = self.get_cog("Music")
                     if music is None:
                         raise ValueError("The Music system is not ready yet. Please try again.")
                     music_payload = dict(request["payload"])
-                    music_payload["action"] = command_name.removeprefix("music_")
+                    configured_command = command_name.removeprefix("music_")
+                    # A Commands-tab ``/play`` follows slash-command
+                    # semantics: append to an active queue. The member Music
+                    # portal's Play button intentionally remains an immediate
+                    # replacement, so give this surface its own action name.
+                    music_payload["command_name"] = configured_command
+                    is_commands_tab = music_payload.get("command_surface") == "commands"
+                    music_payload["action"] = (
+                        "command_play"
+                        if configured_command == "play" and is_commands_tab
+                        else "queue"
+                        if configured_command == "q" and is_commands_tab
+                        else configured_command
+                    )
                     await music.run_dashboard_command(guild, request["requested_by"], music_payload)
                 elif command_name == "spy_lobby":
                     spy_game = self.get_cog("SpyGame")
@@ -339,6 +364,16 @@ class EyooBot(commands.Bot):
                     await roulette.run_dashboard_lobby(
                         guild, channel, request["requested_by"], request.get("payload")
                     )
+                elif command_name == "guess_number_lobby":
+                    guess_number = self.get_cog("GuessNumber")
+                    channel = guild.get_channel(int(request["channel_id"]))
+                    if guess_number is None:
+                        raise ValueError("Guess the Number is not ready yet. Please try again.")
+                    if not isinstance(channel, discord.TextChannel):
+                        raise ValueError("The selected text channel is no longer available.")
+                    await guess_number.run_dashboard_lobby(
+                        guild, channel, request["requested_by"], request.get("payload")
+                    )
                 elif command_name == "server_message":
                     channel = guild.get_channel(int(request["channel_id"]))
                     general = self.get_cog("General")
@@ -355,6 +390,11 @@ class EyooBot(commands.Bot):
                     if general is None:
                         raise ValueError("The Control Panel is not ready yet. Please try again.")
                     command_result = await general.run_dashboard_dm_message(guild, request.get("payload") or {})
+                elif command_name == "temp_vc_action":
+                    general = self.get_cog("General")
+                    if general is None:
+                        raise ValueError("The Temp VC system is not ready yet. Please try again.")
+                    await general.run_dashboard_temp_vc(guild, request["requested_by"], request.get("payload") or {})
                 elif command_name in {"role_create", "role_edit", "role_delete", "role_permissions"}:
                     general = self.get_cog("General")
                     if general is None:
@@ -415,6 +455,10 @@ class EyooBot(commands.Bot):
     @expire_unclaimed_tickets.before_loop
     async def before_expire_unclaimed_tickets(self) -> None:
         await self.wait_until_ready()
+
+    async def close(self) -> None:
+        await self.vc_presence.close()
+        await super().close()
 
 
 def create_bot() -> EyooBot:

@@ -32,6 +32,9 @@ async def run_bot_forever() -> None:
     """Retry transient Discord network failures without stopping the website."""
     while True:
         bot = create_bot()
+        # Let authenticated dashboard requests read safe VC presence state from
+        # the currently running worker without exposing any host token.
+        app.state.vc_presence = bot.vc_presence
         try:
             await bot.start(DISCORD_TOKEN, reconnect=True)
         except asyncio.CancelledError:
@@ -49,6 +52,8 @@ async def run_bot_forever() -> None:
         finally:
             if not bot.is_closed():
                 await bot.close()
+            if getattr(app.state, "vc_presence", None) is bot.vc_presence:
+                app.state.vc_presence = None
         await asyncio.sleep(RETRY_SECONDS)
 
 

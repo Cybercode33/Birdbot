@@ -154,7 +154,7 @@ def game_choice_embed(guild: discord.Guild) -> discord.Embed:
     return spy_embed(
         guild,
         title="Choose Your Game",
-        description="Select a mini-game to start a lobby. Spy Game is available in English and Arabic; Roulette spins a fair player wheel.",
+        description="Select a mini-game to start a lobby. Spy Game is available in English and Arabic; Roulette spins a fair player wheel; Guess the Number gives everyone a turn to find a hidden number.",
     )
 
 
@@ -451,6 +451,7 @@ class GameChooserView(SafeView):
             options=[
                 discord.SelectOption(label="Spy Game", value="spy", description="Find the hidden Spy"),
                 discord.SelectOption(label="Roulette", value="roulette", description="Spin the wheel with your friends"),
+                discord.SelectOption(label="Guess the Number", value="guess-number", description="Take turns finding the hidden number"),
             ],
             custom_id=f"birdbot:games:choose:{owner_id}"[:100],
         )
@@ -477,6 +478,17 @@ class GameChooserView(SafeView):
             created = await roulette.start_interaction_lobby(interaction, deferred=True)
             if created is not False:
                 self.stop()
+            return
+        if selected == "guess-number":
+            guess_number = interaction.client.get_cog("GuessNumber")
+            if guess_number is None or not hasattr(guess_number, "_command"):
+                await self.private_response(interaction, "Guess the Number is still loading. Please try again in a moment.")
+                return
+            if not bool(store.guess_number_game_config(str(interaction.guild.id)).get("enabled", True)):
+                await self.private_response(interaction, "Guess the Number is disabled for this server. Enable it in the Games settings.")
+                return
+            await guess_number._command(interaction)
+            self.stop()
             return
         spy = interaction.client.get_cog("SpyGame")
         if spy is None or not hasattr(spy, "start_interaction_lobby"):

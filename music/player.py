@@ -79,6 +79,11 @@ class MusicPlayer:
     _SPOTIFY_PREVIEW_SECONDS = 30.0
     _IDLE_DISCONNECT_SECONDS = 180.0
     _AUDIO_START_TIMEOUT_SECONDS = 5.0
+    # State is still published to the dashboard every second, but SQLite
+    # writes do not need to happen on every tick. This reduces lock/IO churn
+    # on small hosts while preserving immediate saves for user actions.
+    _STATE_PERSIST_INTERVAL_SECONDS = 5.0
+    _MAX_PREFETCH_TASKS = 1
 
     def __init__(self, bot: Any, guild: discord.Guild) -> None:
         self.bot = bot
@@ -164,7 +169,7 @@ class MusicPlayer:
         # voice clients and stream URLs are never persisted.
         try:
             now = time.monotonic()
-            persist = force or now - self._last_state_persisted_at >= 1.0
+            persist = force or now - self._last_state_persisted_at >= self._STATE_PERSIST_INTERVAL_SECONDS
             store.save_music_state(str(self.guild.id), self._state(), persist=persist)
             if persist:
                 self._last_state_persisted_at = now
@@ -608,9 +613,16 @@ class MusicPlayer:
             )
         # Put the title first. A hyphen between artist and title can be
         # interpreted as an exclusion operator by search providers, causing
-        # valid tracks to return no result. SoundCloud is a lightweight
-        # fallback for tracks that are not available through YouTube.
-        queries = (f"ytsearch1:{title} {artist}", f"scsearch1:{title} {artist}")
+        # valid tracks to return no result. Slash-command requests provide a
+        # raw ``search_query`` so the user's wording is not polluted with a
+        # synthetic artist label; dashboard metadata keeps the artist-aware
+        # search used by Spotify tracks. SoundCloud is a lightweight fallback
+        # for tracks that are not available through YouTube.
+        search_query = str(track.get("search_query") or "").strip()
+        if search_query:
+            queries = (f"ytsearch1:{search_query}", f"scsearch1:{search_query}")
+        else:
+            queries = (f"ytsearch1:{title} {artist}", f"scsearch1:{title} {artist}")
         for index, query in enumerate(queries):
             try:
                 return await asyncio.wait_for(
@@ -666,7 +678,7 @@ class MusicPlayer:
 
     def _schedule_prefetch(self, track: dict[str, object]) -> None:
         key = self._track_key(track)
-        if self._cached_stream(key) is not None or key in self._prefetch_tasks:
+        if self._cached_stream(key) is not None or key in self._prefetch_tasks or len(self._prefetch_tasks) >= self._MAX_PREFETCH_TASKS:
             return
         try:
             self._prefetch_tasks[key] = asyncio.create_task(self._prefetch_stream(track))
@@ -772,15 +784,13 @@ class MusicPlayer:
             source = None
             using_opus_source = False
             source_error: Exception | None = None
-            # FFmpegPCMAudio requires a locally loaded libopus encoder in
-            # discord.py. Windows installations often have PyNaCl/davey but
-            # no opus DLL, which makes playback fail even though voice
-            # connection succeeds. FFmpegOpusAudio encodes Opus itself and is
-            # a reliable fallback in that situation.
-            source_factories = []
+            # Let FFmpeg produce Opus directly first. This avoids the Python
+            # PCM->Opus conversion path and is noticeably cheaper on small
+            # containers. Fall back to the local encoder when a host FFmpeg
+            # build lacks libopus support.
+            source_factories = [(discord.FFmpegOpusAudio, True)]
             if opus.is_loaded():
                 source_factories.append((discord.FFmpegPCMAudio, False))
-            source_factories.append((discord.FFmpegOpusAudio, True))
             for executable in executables:
                 for factory, opus_source in source_factories:
                     candidate = None
@@ -790,7 +800,7 @@ class MusicPlayer:
                             executable=executable,
                             before_options=before_options,
                             options=(
-                                "-vn -sn -dn -nostdin -loglevel warning"
+                                "-vn -sn -dn -nostdin -threads 1 -loglevel warning"
                                 + (f' -af "volume={self.volume:.3f}"' if opus_source else "")
                             ),
                             **({"bitrate": 128} if opus_source else {}),

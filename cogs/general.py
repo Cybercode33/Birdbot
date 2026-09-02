@@ -8,6 +8,7 @@ import time
 import re
 import html
 import secrets
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,6 @@ SUPPORT_ROLE_ERROR = "Error: You do not have the required Support Role to claim 
 DM_DELIVERED = "delivered"
 DM_FAILED = "failed"
 AUTO_TIMEOUT_EVENT = "Ticket Auto-Deleted (Unclaimed Timeout - 5 min)"
-
 LOG_EVENT_LABELS = {
     "voice_join": "Voice channel joined",
     "voice_leave": "Voice channel left",
@@ -54,7 +54,49 @@ LOG_EVENT_LABELS = {
     "moderation_warning": "Warning issued",
     "moderation_unwarning": "Warning removed",
     "moderation_timeout": "Member timed out",
+    "moderation_mute": "Member server-muted",
+    "moderation_automod": "Automod action",
 }
+LOG_EVENT_ACTIONS = {
+    "voice_join": "joined",
+    "voice_leave": "left",
+    "voice_move": "moved voice rooms",
+    "voice_disconnect": "left",
+    "voice_server_mute": "was server-muted",
+    "voice_server_deaf": "was server-deafened",
+    "message_sent": "sent a message",
+    "message_edited": "edited a message",
+    "message_deleted": "deleted a message",
+    "server_update": "updated server settings",
+    "channel_create": "created a channel",
+    "channel_update": "updated a channel",
+    "channel_delete": "deleted a channel",
+    "role_create": "created a role",
+    "role_update": "updated a role",
+    "role_delete": "deleted a role",
+    "member_join": "joined the server",
+    "member_leave": "left the server",
+    "member_update": "updated their server profile",
+    "moderation_kick": "kicked",
+    "moderation_ban": "banned",
+    "moderation_unban": "unbanned",
+    "moderation_warning": "warned",
+    "moderation_unwarning": "removed a warning from",
+    "moderation_timeout": "timed out",
+    "moderation_mute": "server-muted",
+    "moderation_automod": "applied an Automod rule to",
+}
+_LOG_MODERATION_EVENTS = {
+    "moderation_kick", "moderation_ban", "moderation_unban", "moderation_warning",
+    "moderation_unwarning", "moderation_timeout", "moderation_mute", "moderation_automod",
+}
+_LOG_USER_EVENTS = {
+    "voice_join", "voice_leave", "voice_move", "voice_disconnect", "voice_server_mute",
+    "voice_server_deaf", "message_sent", "message_edited", "message_deleted", "member_join",
+    "member_leave", "member_update",
+}
+_LOG_CHANNEL_EVENTS = {"channel_create", "channel_update", "channel_delete"}
+_LOG_ROLE_EVENTS = {"role_create", "role_update", "role_delete"}
 
 
 def _log_person(value: object | None) -> tuple[str | None, str | None]:
@@ -75,6 +117,126 @@ def _log_avatar_url(value: object | None) -> str | None:
     avatar = getattr(value, "display_avatar", None) or getattr(value, "avatar", None)
     url = getattr(avatar, "url", None)
     return str(url) if url else None
+
+
+def _log_identity_detail(value: object | None, identifier: str | None, name: str | None) -> str | None:
+    """Return a consistent mention, username, and ID label for every log."""
+    if not identifier and not name:
+        return None
+    mention = f"<@{identifier}>" if identifier and identifier.isdigit() else None
+    username = None
+    if isinstance(value, dict):
+        username = value.get("username") or value.get("user_name") or value.get("name")
+    elif value is not None:
+        username = getattr(value, "name", None) or getattr(value, "global_name", None)
+    labels = [label for label in (mention, str(name or "").strip() or None) if label]
+    if username and str(username) not in labels:
+        labels.append(f"@{username}")
+    if identifier:
+        labels.append(f"ID: {identifier}")
+    if not labels:
+        return None
+    if len(labels) == 1:
+        return labels[0]
+    suffix = f" · {labels[2]}" if len(labels) > 2 else ""
+    return f"{labels[0]} ({labels[1]}{suffix})"
+
+
+def _log_user_mention(identifier: str | None, name: str | None) -> str | None:
+    """Return a real Discord user mention, with a readable fallback."""
+    if identifier and identifier.isdigit():
+        return f"<@{identifier}>"
+    if name:
+        return f"@{str(name).strip()}"
+    return None
+
+
+def _log_channel_mention(identifier: str | None, name: str | None) -> str | None:
+    """Return a real Discord channel mention, with a readable fallback."""
+    if identifier and identifier.isdigit():
+        return f"<#{identifier}>"
+    if name:
+        return f"#{str(name).strip()}"
+    return None
+
+
+def _log_role_mention(identifier: str | None, name: str | None) -> str | None:
+    if identifier and identifier.isdigit():
+        return f"<@&{identifier}>"
+    if name:
+        return f"@{str(name).strip()}"
+    return None
+
+
+def _compact_log_context(event_type: str, details: str) -> str:
+    """Keep useful context while removing repetitive multi-line event prose."""
+    text = " ".join(str(details or "").split()).strip()
+    if not text:
+        return ""
+    # The action and channel are already in the sentence for these events.
+    if event_type in {
+        "voice_join", "voice_leave", "voice_move", "voice_disconnect", "voice_server_mute",
+        "voice_server_deaf", "message_sent", "message_edited", "message_deleted",
+        "member_join", "member_leave", "channel_create", "channel_delete", "role_create", "role_delete",
+    }:
+        return ""
+    if event_type == "moderation_warning":
+        text = re.sub(r"^Warning #(\d+) issued\.\s*", r"Warning #\1", text, flags=re.IGNORECASE)
+    return text[:700]
+
+
+def simple_log_line(
+    event_type: str,
+    *,
+    actor_id: str | None,
+    actor_name: str | None,
+    target_id: str | None,
+    target_name: str | None,
+    channel_id: str | None,
+    channel_name: str | None,
+    details: str = "",
+) -> str:
+    """Build one short, consistent sentence for stored and Discord logs."""
+    actor = _log_user_mention(actor_id, actor_name)
+    target = _log_user_mention(target_id, target_name)
+    channel = _log_channel_mention(channel_id, channel_name)
+    action = LOG_EVENT_ACTIONS.get(event_type, event_type.replace("_", " ").lower())
+
+    if event_type in _LOG_MODERATION_EVENTS:
+        line = f"{actor or 'BirdBot'} {action}"
+        if target:
+            line += f" {target}"
+    elif event_type in _LOG_USER_EVENTS:
+        subject = target or actor or "A member"
+        if event_type == "voice_move" and channel:
+            line = f"{subject} moved to {channel}"
+        elif event_type in {"voice_join", "voice_disconnect", "voice_leave"}:
+            line = f"{subject} {action} {channel or 'the voice room'}"
+        else:
+            line = f"{subject} {action}"
+        if channel and event_type not in {"voice_move", "voice_join", "voice_disconnect", "voice_leave"}:
+            line += f" in {channel}"
+    elif event_type in _LOG_CHANNEL_EVENTS:
+        subject = channel or (f"#{channel_name}" if channel_name else "a channel")
+        line = f"{actor} {action} {subject}" if actor else f"{subject} was {action}"
+    elif event_type in _LOG_ROLE_EVENTS:
+        role = _log_role_mention(target_id, target_name) or "a role"
+        line = f"{actor} {action} {role}" if actor else f"{role} was {action}"
+    elif event_type == "server_update":
+        line = f"{actor} {action}" if actor else "Server settings changed"
+        if channel:
+            line += f" in {channel}"
+    else:
+        line = f"{actor or 'BirdBot'} {action}"
+        if target:
+            line += f" {target}"
+        if channel:
+            line += f" in {channel}"
+
+    context = _compact_log_context(event_type, details)
+    if context:
+        line += f" — {context}"
+    return line[:4_000]
 
 
 def log_event_embed(
@@ -107,15 +269,7 @@ def log_event_embed(
     if actor_id and actor_id.isdigit():
         embed.set_author(name=f"<@{actor_id}>", icon_url=actor_avatar_url)
     elif actor_name:
-        embed.set_author(name=actor_name[:1_024], icon_url=actor_avatar_url)
-    if target_id and target_id.isdigit():
-        embed.add_field(name="Member / target", value=f"<@{target_id}>", inline=True)
-    elif target_name:
-        embed.add_field(name="Member / target", value=target_name[:1_024], inline=True)
-    if channel_id and channel_id.isdigit():
-        embed.add_field(name="Channel", value=f"<#{channel_id}>", inline=True)
-    elif channel_name:
-        embed.add_field(name="Channel", value=f"#{channel_name}"[:1_024], inline=True)
+        embed.set_author(name=f"@{actor_name[:1_024]}", icon_url=actor_avatar_url)
     embed.set_footer(text=f"{guild.name} · BirdBot logs")
     try:
         embed.timestamp = datetime.fromisoformat(created_at)
@@ -748,6 +902,12 @@ class General(commands.Cog):
         self.bot = bot
         self._ticket_views_registered: set[str] = set()
         self._ticket_control_views_registered: set[str] = set()
+        # These counters are intentionally process-local. They are short
+        # rolling windows, not moderation history; persisted warnings/logs
+        # remain the source of truth across restarts.
+        self._spam_windows: dict[tuple[int, int], deque[float]] = {}
+        self._raid_windows: dict[int, deque[float]] = {}
+        self._automod_in_flight: set[tuple[int, int]] = set()
 
     @staticmethod
     def _is_log_delivery_message(message: discord.Message) -> bool:
@@ -792,11 +952,23 @@ class General(commands.Cog):
         # objects, while _log_person still handles deleted/unknown objects.
         if channel is not None:
             channel_name = str(getattr(channel, "name", None) or channel_name or "") or None
+        # Keep the stored dashboard record and the Discord embed to one clear
+        # sentence: the user, the action, and the related channel/voice room.
+        enriched_details = simple_log_line(
+            event_type,
+            actor_id=actor_id,
+            actor_name=actor_name,
+            target_id=target_id,
+            target_name=target_name,
+            channel_id=channel_id,
+            channel_name=channel_name,
+            details=details,
+        )
         record = store.create_log(
             str(guild.id), event_type, actor_id=actor_id, actor_name=actor_name,
             actor_avatar_url=actor_avatar_url,
             target_id=target_id, target_name=target_name, channel_id=channel_id,
-            channel_name=channel_name, details=details,
+            channel_name=channel_name, details=enriched_details,
         )
         category_channels = config.get("category_channels")
         raw_channel_id = category_channels.get(category) if isinstance(category_channels, dict) else config.get("log_channel_id")
@@ -829,6 +1001,171 @@ class General(commands.Cog):
         except (discord.Forbidden, discord.HTTPException):
             return
 
+    @staticmethod
+    def _automod_exempt(member: discord.Member) -> bool:
+        permissions = member.guild_permissions
+        return bool(permissions.administrator or permissions.manage_guild or permissions.manage_messages)
+
+    @staticmethod
+    def _automod_link(content: str) -> bool:
+        # Match explicit schemes/invites as well as ordinary domains users
+        # paste without ``https://`` (for example ``example.com``).
+        return bool(re.search(
+            r"(?:https?://|www\.|discord\.gg/|discord(?:app)?\.com/invite/|\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?:[/?:#\s.,!)]|$))",
+            content,
+            re.IGNORECASE,
+        ))
+
+    @staticmethod
+    def _automod_banned_word(content: str, words: object) -> str | None:
+        if not isinstance(words, list):
+            return None
+        normalized = content.casefold()
+        for raw_word in words:
+            word = str(raw_word or "").strip()
+            if not word:
+                continue
+            folded = word.casefold()
+            if " " in folded:
+                if folded in normalized:
+                    return word
+            elif re.search(rf"(?<!\w){re.escape(folded)}(?!\w)", normalized, re.IGNORECASE):
+                return word
+        return None
+
+    async def _apply_automod_violation(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        reason: str,
+        *,
+        message: discord.Message | None = None,
+        config: dict[str, object] | None = None,
+    ) -> bool:
+        """Apply the configured response to one Automod violation.
+
+        Deleting, warning, and timing out are all best-effort and permission
+        checked independently so one missing Discord permission never stops
+        the bot's event listeners.
+        """
+        if member.bot or self._automod_exempt(member):
+            return False
+        config = config or store.automod_config(str(guild.id))
+        if not config.get("enabled"):
+            return False
+        key = (int(guild.id), int(member.id))
+        if key in self._automod_in_flight:
+            return False
+        self._automod_in_flight.add(key)
+        deleted = False
+        warning_text = "not configured"
+        timeout_text = "not configured"
+        try:
+            bot_member = guild.me
+            if message is not None and bot_member and bot_member.guild_permissions.manage_messages:
+                try:
+                    await message.delete(reason=f"BirdBot Automod: {reason}")
+                    deleted = True
+                except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                    deleted = False
+            problem = self.moderation_problem(guild, member)
+            if config.get("auto_warning"):
+                if problem:
+                    warning_text = problem
+                elif bot_member and bot_member.guild_permissions.moderate_members:
+                    try:
+                        language = self._warning_language(guild)
+                        await self._issue_warning(guild, member, bot_member, reason, language, channel=message.channel if message else None)
+                        warning_text = "issued"
+                    except (discord.Forbidden, discord.HTTPException):
+                        warning_text = "failed"
+                else:
+                    warning_text = "BirdBot needs Moderate Members"
+            if config.get("auto_timeout"):
+                if problem:
+                    timeout_text = problem
+                elif bot_member and bot_member.guild_permissions.moderate_members:
+                    try:
+                        minutes = max(1, min(int(config.get("auto_timeout_minutes", 10)), 28 * 24 * 60))
+                        await member.timeout(timedelta(minutes=minutes), reason=f"BirdBot Automod: {reason}")
+                        timeout_text = f"{minutes} minutes"
+                    except (discord.Forbidden, discord.HTTPException):
+                        timeout_text = "failed"
+                else:
+                    timeout_text = "BirdBot needs Moderate Members"
+            await self.write_log(
+                guild,
+                "moderation_automod",
+                actor=bot_member or self.bot.user,
+                target=member,
+                channel=message.channel if message else None,
+                details=(
+                    f"Rule: {reason}\nMessage deleted: {'yes' if deleted else 'no'}\n"
+                    f"Warning: {warning_text}\nTimeout: {timeout_text}"
+                ),
+            )
+            return True
+        finally:
+            self._automod_in_flight.discard(key)
+
+    async def apply_automod(self, message: discord.Message) -> bool:
+        """Check one guild message against its enabled Automod rules."""
+        if not message.guild or message.author.bot:
+            return False
+        member = message.author if isinstance(message.author, discord.Member) else message.guild.get_member(message.author.id)
+        if not member:
+            return False
+        config = store.automod_config(str(message.guild.id))
+        if not config.get("enabled") or self._automod_exempt(member):
+            return False
+        reason: str | None = None
+        content = str(message.content or "")
+        if config.get("anti_link") and self._automod_link(content):
+            reason = "Anti-link blocked a link"
+        elif config.get("banned_words"):
+            matched = self._automod_banned_word(content, config.get("banned_words_list"))
+            if matched:
+                reason = f"Banned words filter matched {matched!r}"
+        if config.get("anti_spam"):
+            key = (int(message.guild.id), int(member.id))
+            now = time.monotonic()
+            window = self._spam_windows.setdefault(key, deque())
+            seconds = max(3, int(config.get("spam_window_seconds", 8)))
+            while window and now - window[0] > seconds:
+                window.popleft()
+            window.append(now)
+            limit = max(3, int(config.get("spam_message_limit", 5)))
+            if len(window) >= limit:
+                reason = reason or f"Anti-spam limit reached ({limit} messages in {seconds}s)"
+                window.clear()
+        if not reason:
+            return False
+        return await self._apply_automod_violation(message.guild, member, reason, message=message, config=config)
+
+    async def apply_raid_protection(self, member: discord.Member) -> bool:
+        """Track joins and apply the configured response during a join burst."""
+        config = store.automod_config(str(member.guild.id))
+        if not config.get("enabled") or not config.get("raid_protection") or member.bot:
+            return False
+        now = time.monotonic()
+        window = self._raid_windows.setdefault(int(member.guild.id), deque())
+        seconds = max(5, int(config.get("raid_window_seconds", 10)))
+        while window and now - window[0] > seconds:
+            window.popleft()
+        window.append(now)
+        limit = max(3, int(config.get("raid_join_limit", 8)))
+        if len(window) < limit:
+            return False
+        # Keep the burst counter from triggering the same response on every
+        # subsequent join while the raid is active.
+        window.clear()
+        return await self._apply_automod_violation(
+            member.guild,
+            member,
+            f"Raid protection detected {limit} joins within {seconds}s",
+            config=config,
+        )
+
     async def apply_auto_reacts(self, message: discord.Message) -> None:
         """Apply every enabled reaction rule configured for this channel."""
         if not message.guild or message.author.bot:
@@ -852,7 +1189,9 @@ class General(commands.Cog):
     async def on_message(self, message: discord.Message) -> None:
         if not message.guild or self._is_log_delivery_message(message):
             return
-        await self.apply_auto_reacts(message)
+        automod_triggered = await self.apply_automod(message)
+        if not automod_triggered:
+            await self.apply_auto_reacts(message)
         content = str(message.content or "").strip() or "[No text]"
         if message.attachments:
             content += "\nAttachments: " + ", ".join(attachment.filename for attachment in message.attachments[:8])
@@ -878,6 +1217,263 @@ class General(commands.Cog):
         content = str(message.content or "").strip() or "[Content unavailable]"
         await self.write_log(message.guild, "message_deleted", actor=message.author, channel=message.channel, details=content[:4_000])
 
+    @staticmethod
+    def _temp_vc_name(template: object, member: discord.Member) -> str:
+        """Render the small set of safe placeholders supported by Temp VC."""
+        value = str(template or "{owner}'s room")
+        value = value.replace("{owner}", member.display_name).replace("{username}", member.name)
+        value = " ".join(value.replace("\r", " ").replace("\n", " ").split()).strip()
+        return (value or f"{member.display_name}'s room")[:100]
+
+    @staticmethod
+    def _temp_vc_owner_overwrite() -> discord.PermissionOverwrite:
+        return discord.PermissionOverwrite(
+            connect=True,
+            manage_channels=True,
+            move_members=True,
+            mute_members=True,
+            deafen_members=True,
+        )
+
+    async def _delete_temp_vc(self, channel: discord.VoiceChannel, *, reason: str) -> bool:
+        """Delete an empty temporary channel and its persisted record."""
+        try:
+            await channel.delete(reason=reason)
+        except discord.NotFound:
+            pass
+        except (discord.Forbidden, discord.HTTPException):
+            return False
+        store.delete_temp_vc_channel(str(channel.guild.id), str(channel.id))
+        return True
+
+    async def _transfer_temp_vc_owner(
+        self,
+        channel: discord.VoiceChannel,
+        record: dict[str, object],
+        new_owner: discord.Member,
+    ) -> dict[str, object] | None:
+        old_owner_id = str(record.get("owner_id") or "")
+        if old_owner_id.isdigit() and old_owner_id != str(new_owner.id):
+            old_owner = channel.guild.get_member(int(old_owner_id))
+            if old_owner:
+                old_overwrite = channel.overwrites_for(old_owner)
+                old_overwrite.connect = None
+                old_overwrite.manage_channels = None
+                old_overwrite.move_members = None
+                old_overwrite.mute_members = None
+                old_overwrite.deafen_members = None
+                await channel.set_permissions(old_owner, overwrite=old_overwrite, reason="Temporary voice channel ownership transferred")
+        await channel.set_permissions(
+            new_owner,
+            overwrite=self._temp_vc_owner_overwrite(),
+            reason="Temporary voice channel ownership transferred",
+        )
+        return store.update_temp_vc_channel(
+            str(channel.guild.id),
+            str(channel.id),
+            owner_id=str(new_owner.id),
+            owner_name=new_owner.display_name,
+        )
+
+    async def _create_temp_vc_for_member(self, member: discord.Member, lobby: discord.VoiceChannel) -> None:
+        config = store.temp_vc_config(str(member.guild.id))
+        if not config.get("enabled") or str(config.get("lobby_channel_id") or "") != str(lobby.id):
+            return
+        bot_member = member.guild.me
+        if not bot_member:
+            return
+        permissions = lobby.permissions_for(bot_member)
+        if not permissions.manage_channels or not permissions.move_members:
+            print(f"Temp VC requires Manage Channels and Move Members in {member.guild.name}.")
+            return
+        category = None
+        category_id = str(config.get("category_id") or "")
+        if category_id.isdigit():
+            candidate = member.guild.get_channel(int(category_id))
+            if isinstance(candidate, discord.CategoryChannel):
+                category = candidate
+        if category is None:
+            category = lobby.category
+        name = self._temp_vc_name(config.get("channel_name_template"), member)
+        overwrites = {
+            member.guild.default_role: discord.PermissionOverwrite(connect=True),
+            member: self._temp_vc_owner_overwrite(),
+        }
+        try:
+            channel = await member.guild.create_voice_channel(
+                name,
+                category=category,
+                overwrites=overwrites,
+                user_limit=max(0, min(int(config.get("user_limit") or 0), 99)),
+                reason=f"Temporary voice channel for {member}",
+            )
+        except (discord.Forbidden, discord.HTTPException) as error:
+            print(f"Could not create Temp VC in {member.guild.name}: {error}")
+            return
+        store.save_temp_vc_channel(
+            str(member.guild.id),
+            str(channel.id),
+            str(member.id),
+            member.display_name,
+            channel.name,
+        )
+        try:
+            await member.move_to(channel, reason="Move member into their temporary voice channel")
+        except (discord.Forbidden, discord.HTTPException) as error:
+            print(f"Could not move {member} into Temp VC: {error}")
+            await self._delete_temp_vc(channel, reason="Remove unusable temporary voice channel")
+
+    async def handle_temp_vc_voice_state(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        """Create, protect, transfer, and clean up temporary voice channels."""
+        if member.bot:
+            return
+        before_channel = before.channel if isinstance(before.channel, discord.VoiceChannel) else None
+        after_channel = after.channel if isinstance(after.channel, discord.VoiceChannel) else None
+        if after_channel and after_channel.id != (before_channel.id if before_channel else None):
+            config = store.temp_vc_config(str(member.guild.id))
+            if config.get("enabled") and str(config.get("lobby_channel_id") or "") == str(after_channel.id):
+                await self._create_temp_vc_for_member(member, after_channel)
+        if after_channel:
+            joined_record = store.temp_vc_channel(str(member.guild.id), str(after_channel.id))
+            if joined_record and str(member.id) in {str(value) for value in (joined_record.get("blocked_user_ids") or [])}:
+                bot_member = member.guild.me
+                if bot_member and after_channel.permissions_for(bot_member).move_members:
+                    try:
+                        await member.move_to(None, reason="Blocked from temporary voice channel")
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+        if not before_channel:
+            return
+        record = store.temp_vc_channel(str(member.guild.id), str(before_channel.id))
+        if not record or (after_channel and after_channel.id == before_channel.id):
+            return
+        human_members = [voice_member for voice_member in before_channel.members if not voice_member.bot and voice_member.id != member.id]
+        if not human_members:
+            await self._delete_temp_vc(before_channel, reason="Remove empty temporary voice channel")
+            return
+        if str(record.get("owner_id") or "") == str(member.id):
+            try:
+                await self._transfer_temp_vc_owner(before_channel, record, human_members[0])
+            except (discord.Forbidden, discord.HTTPException):
+                # Ownership persistence is best-effort; the channel can still
+                # be managed by the server administrator from the dashboard.
+                return
+
+    async def reconcile_temp_vcs(self) -> None:
+        """Clean stale Temp VC records after a bot restart or reconnect."""
+        for guild in self.bot.guilds:
+            for record in store.temp_vc_channels(str(guild.id)):
+                channel_id = str(record.get("channel_id") or "")
+                channel = guild.get_channel(int(channel_id)) if channel_id.isdigit() else None
+                if not isinstance(channel, discord.VoiceChannel):
+                    store.delete_temp_vc_channel(str(guild.id), channel_id)
+                    continue
+                human_members = [member for member in channel.members if not member.bot]
+                if not human_members:
+                    await self._delete_temp_vc(channel, reason="Remove empty temporary voice channel after restart")
+                    continue
+                owner_id = str(record.get("owner_id") or "")
+                if not any(str(member.id) == owner_id for member in human_members):
+                    try:
+                        await self._transfer_temp_vc_owner(channel, record, human_members[0])
+                    except (discord.Forbidden, discord.HTTPException):
+                        continue
+
+    async def run_dashboard_temp_vc(self, guild: discord.Guild, requested_by: str, payload: dict[str, Any]) -> None:
+        """Apply one validated Temp VC management action from the dashboard."""
+        if not store.temp_vc_config(str(guild.id)).get("enabled"):
+            raise ValueError("Temp VC is disabled for this server. Enable it in the Control Panel first.")
+        channel_id = str(payload.get("channel_id") or "")
+        record = store.temp_vc_channel(str(guild.id), channel_id)
+        channel = guild.get_channel(int(channel_id)) if channel_id.isdigit() else None
+        if not record or not isinstance(channel, discord.VoiceChannel):
+            store.delete_temp_vc_channel(str(guild.id), channel_id)
+            raise ValueError("That temporary voice channel is no longer active.")
+        actor = await resolve_guild_member(guild, str(requested_by), attempts=1, timeout_seconds=4)
+        if not actor:
+            raise ValueError("Your server membership is still syncing. Wait a moment, then try again.")
+        action = str(payload.get("action") or "").casefold()
+        bot_member = guild.me
+        if not bot_member:
+            raise ValueError("BirdBot is not ready in this server.")
+        channel_permissions = channel.permissions_for(bot_member)
+        if action == "kick":
+            if not channel_permissions.move_members:
+                raise ValueError("BirdBot needs Move Members permission in that voice channel.")
+        elif not channel_permissions.manage_channels:
+            raise ValueError("BirdBot needs Manage Channels permission in that voice channel.")
+        target = None
+        target_id = str(payload.get("member_id") or "")
+        if action in {"block", "unblock", "transfer", "kick"}:
+            target = await resolve_guild_member(guild, target_id)
+            if not target or target.bot:
+                raise ValueError("Choose a valid human server member.")
+        if action == "rename":
+            name = str(payload.get("name") or "").strip()
+            if not 1 <= len(name) <= 100:
+                raise ValueError("Channel names must be 1-100 characters.")
+            await channel.edit(name=name, reason=f"Temp VC renamed by {actor}")
+            store.update_temp_vc_channel(str(guild.id), channel_id, channel_name=name)
+            details = f"Renamed temporary voice channel to {name}."
+        elif action in {"lock", "unlock"}:
+            overwrite = channel.overwrites_for(guild.default_role)
+            overwrite.connect = action == "lock"
+            if action == "lock":
+                overwrite.connect = False
+            else:
+                overwrite.connect = None
+            await channel.set_permissions(guild.default_role, overwrite=overwrite, reason=f"Temp VC {action} by {actor}")
+            store.update_temp_vc_channel(str(guild.id), channel_id, locked=action == "lock")
+            details = f"{'Locked' if action == 'lock' else 'Unlocked'} temporary voice channel."
+        elif action in {"block", "unblock"} and target:
+            blocked = {str(value) for value in (record.get("blocked_user_ids") or [])}
+            if action == "block":
+                if str(target.id) == str(record.get("owner_id") or ""):
+                    raise ValueError("Transfer ownership before blocking the current owner.")
+                blocked.add(str(target.id))
+                overwrite = channel.overwrites_for(target)
+                overwrite.connect = False
+                await channel.set_permissions(target, overwrite=overwrite, reason=f"Blocked from Temp VC by {actor}")
+                if target.voice and target.voice.channel and target.voice.channel.id == channel.id:
+                    await target.move_to(None, reason=f"Removed from Temp VC by {actor}")
+                details = f"Blocked {target.mention} from the temporary voice channel."
+            else:
+                blocked.discard(str(target.id))
+                overwrite = channel.overwrites_for(target)
+                overwrite.connect = False if bool(record.get("locked")) else None
+                await channel.set_permissions(target, overwrite=overwrite, reason=f"Unblocked from Temp VC by {actor}")
+                details = f"Removed {target.mention} from the temporary voice-channel block list."
+            store.update_temp_vc_channel(str(guild.id), channel_id, blocked_user_ids=sorted(blocked))
+        elif action == "limit":
+            try:
+                user_limit = int(payload.get("user_limit", 0))
+            except (TypeError, ValueError) as error:
+                raise ValueError("User limit must be a whole number from 0 to 99.") from error
+            if not 0 <= user_limit <= 99:
+                raise ValueError("User limit must be a whole number from 0 to 99.")
+            await channel.edit(user_limit=user_limit, reason=f"Temp VC user limit changed by {actor}")
+            details = f"Set temporary voice-channel user limit to {user_limit or 'unlimited'}."
+        elif action == "transfer" and target:
+            if str(target.id) in {str(value) for value in (record.get("blocked_user_ids") or [])}:
+                raise ValueError("Unblock that member before transferring ownership.")
+            await self._transfer_temp_vc_owner(channel, record, target)
+            details = f"Transferred temporary voice-channel ownership to {target.mention}."
+        elif action == "kick" and target:
+            if str(target.id) == str(record.get("owner_id") or ""):
+                raise ValueError("Transfer ownership before kicking the current owner.")
+            if not target.voice or not target.voice.channel or target.voice.channel.id != channel.id:
+                raise ValueError("That member is not in this temporary voice channel.")
+            await target.move_to(None, reason=f"Kicked from Temp VC by {actor}")
+            details = f"Kicked {target.mention} from the temporary voice channel."
+        else:
+            raise ValueError("That Temp VC action is not available.")
+        await self.write_log(guild, "server_update", actor=actor, target=target, channel=channel, details=details)
+
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
         before_channel = before.channel
@@ -894,6 +1490,7 @@ class General(commands.Cog):
         if before.deaf != after.deaf:
             action = "server-deafened" if after.deaf else "server-undeafened"
             await self.write_log(member.guild, "voice_server_deaf", actor=member, target=member, channel=after_channel or before_channel, details=f"Member was {action}.")
+        await self.handle_temp_vc_voice_state(member, before, after)
 
     @commands.Cog.listener()
     async def on_guild_update(self, before: discord.Guild, after: discord.Guild) -> None:
@@ -941,6 +1538,7 @@ class General(commands.Cog):
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
         await self.write_log(member.guild, "member_join", actor=member, target=member, details=f"{member} joined the server.")
+        await self.apply_raid_protection(member)
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member) -> None:
@@ -1362,7 +1960,7 @@ class General(commands.Cog):
         command_name = str(ctx.command.qualified_name if ctx.command else "").replace(" ", "_")
         if command_name == "show_warnings":
             command_name = "show_warning"
-        if command_name in {"ping", "server", "profile", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "lock", "unlock", "delete"}:
+        if command_name in {"ping", "server", "profile", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "mute", "lock", "unlock", "delete"}:
             return bool(store.command_config(str(ctx.guild.id), command_name).get("enabled", True))
         return True
 
@@ -1374,7 +1972,7 @@ class General(commands.Cog):
         command_name = str(getattr(command, "qualified_name", "") or getattr(command, "name", "")).replace(" ", "_")
         if command_name == "show_warnings":
             command_name = "show_warning"
-        if command_name in {"ping", "server", "profile", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "lock", "unlock", "delete"} and not store.command_config(str(interaction.guild.id), command_name).get("enabled", True):
+        if command_name in {"ping", "server", "profile", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "mute", "lock", "unlock", "delete"} and not store.command_config(str(interaction.guild.id), command_name).get("enabled", True):
             language = str(store.command_config(str(interaction.guild.id), command_name).get("language") or "en")
             await interaction.response.send_message(command_message("common", language, "disabled"), ephemeral=True)
             return False
@@ -1409,6 +2007,8 @@ class General(commands.Cog):
         moderator: discord.abc.User,
         reason: str | None,
         language: str,
+        *,
+        channel: object | None = None,
     ) -> tuple[dict[str, object], bool, str]:
         """Persist a warning and notify the member without making DM failure fatal."""
         normalized_reason = self._warning_reason(reason, language)
@@ -1425,6 +2025,7 @@ class General(commands.Cog):
             "moderation_warning",
             actor=moderator,
             target=member,
+            channel=channel,
             details=f"Warning #{warning['warning_id']} issued.\nReason: {normalized_reason}",
         )
         dm_delivered = True
@@ -1904,7 +2505,7 @@ class General(commands.Cog):
         return len(deleted)
 
     async def run_dashboard_command(self, guild: discord.Guild, channel: discord.TextChannel, name: str, requested_by: str, payload: dict[str, Any]) -> None:
-        if name in {"ping", "server", "profile", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "lock", "unlock", "delete"} and not store.command_config(str(guild.id), name).get("enabled", True):
+        if name in {"ping", "server", "profile", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "mute", "lock", "unlock", "delete"} and not store.command_config(str(guild.id), name).get("enabled", True):
             raise ValueError("That command is disabled for this server. Enable it from the website Commands tab first.")
         bot_member = guild.me
         if not bot_member:
@@ -1915,7 +2516,9 @@ class General(commands.Cog):
         # /unlock afterwards. Manage Channels is sufficient for the lock
         # operations themselves; delete similarly only needs moderation
         # permissions to remove messages.
-        requires_send_messages = name not in {"lock", "unlock", "delete"}
+        requires_send_messages = name not in {"lock", "unlock", "delete"} and not (
+            bool(payload.get("silent")) and name in {"kick", "ban", "warning", "unwarning", "timeout", "mute", "unban"}
+        )
         if not channel_permissions.view_channel or (requires_send_messages and not channel_permissions.send_messages):
             raise ValueError("BirdBot cannot access that channel. Grant it View Channel and Send Messages permissions.")
         if name in {"server", "profile", "ticket_post"} and not channel_permissions.embed_links:
@@ -2050,9 +2653,38 @@ class General(commands.Cog):
                 "moderation_timeout",
                 actor=moderator,
                 target=member,
+                channel=channel,
                 details=f"Duration: {duration} minute(s).\nReason: {display_reason}",
             )
-            await channel.send(command_message("timeout", language, "success", member=member.mention, duration=duration, reason=display_reason), allowed_mentions=discord.AllowedMentions(users=[member]))
+            if not payload.get("silent"):
+                await channel.send(command_message("timeout", language, "success", member=member.mention, duration=duration, reason=display_reason), allowed_mentions=discord.AllowedMentions(users=[member]))
+            return
+        if name == "mute":
+            if not bot_member.guild_permissions.mute_members:
+                raise ValueError(command_message("mute", language, "dashboard_permission"))
+            member = await resolve_guild_member(guild, str(payload.get("member_id") or ""))
+            if not member:
+                raise ValueError("That member could not be loaded from Discord. Search again and retry in a moment.")
+            problem = self.moderation_problem(guild, member)
+            if problem:
+                raise ValueError(problem)
+            if not member.voice or not member.voice.channel:
+                raise ValueError(command_message("mute", language, "not_in_voice"))
+            supplied_reason = str(payload.get("reason") or "").strip()
+            reason = (supplied_reason or f"Dashboard action by {requested_by}")[:512]
+            display_reason = supplied_reason[:512] or command_message("mute", language, "no_reason")
+            moderator = await resolve_guild_member(guild, str(requested_by), attempts=1, timeout_seconds=4)
+            await member.edit(mute=True, reason=reason)
+            await self.write_log(
+                guild,
+                "moderation_mute",
+                actor=moderator,
+                target=member,
+                channel=member.voice.channel if member.voice else None,
+                details=f"Reason: {display_reason}",
+            )
+            if not payload.get("silent"):
+                await channel.send(command_message("mute", language, "success", member=member.mention), allowed_mentions=discord.AllowedMentions(users=[member]))
             return
         if name in {"lock", "unlock"}:
             await self._set_channel_lock(channel, name == "lock", language)
@@ -2091,7 +2723,7 @@ class General(commands.Cog):
             problem = await self._warning_member_problem(guild, member)
             if problem:
                 raise ValueError(problem)
-            warning, dm_delivered, reason = await self._issue_warning(guild, member, moderator, payload.get("reason"), language)
+            warning, dm_delivered, reason = await self._issue_warning(guild, member, moderator, payload.get("reason"), language, channel=channel)
             message = command_message(
                 "warning",
                 language,
@@ -2102,7 +2734,8 @@ class General(commands.Cog):
             )
             if not dm_delivered:
                 message += command_message("warning", language, "dm_failed")
-            await channel.send(message, allowed_mentions=discord.AllowedMentions(users=[member]))
+            if not payload.get("silent"):
+                await channel.send(message, allowed_mentions=discord.AllowedMentions(users=[member]))
             return
         if name == "unwarning":
             if not bot_member.guild_permissions.moderate_members:
@@ -2122,13 +2755,15 @@ class General(commands.Cog):
                 "moderation_unwarning",
                 actor=moderator,
                 target=target or warning,
+                channel=channel,
                 details=f"Warning #{warning['warning_id']} removed.\nOriginal reason: {warning.get('reason') or 'No reason provided.'}",
             )
             member_label = target.mention if target else str(warning.get("member_name") or warning.get("member_id"))
-            await channel.send(
-                command_message("unwarning", language, "success", number=warning["warning_id"], member=member_label),
-                allowed_mentions=discord.AllowedMentions(users=[target] if target else []),
-            )
+            if not payload.get("silent"):
+                await channel.send(
+                    command_message("unwarning", language, "success", number=warning["warning_id"], member=member_label),
+                    allowed_mentions=discord.AllowedMentions(users=[target] if target else []),
+                )
             return
         if name == "show_warning":
             if not bot_member.guild_permissions.moderate_members:
@@ -2144,7 +2779,7 @@ class General(commands.Cog):
             user = await self.bot.fetch_user(int(str(payload["member_id"])))
             moderator = await resolve_guild_member(guild, str(requested_by), attempts=1, timeout_seconds=4)
             await guild.unban(user, reason=f"Dashboard action by {requested_by}")
-            await self.write_log(guild, "moderation_unban", actor=moderator, target=user, details="Member unbanned from the server.")
+            await self.write_log(guild, "moderation_unban", actor=moderator, target=user, channel=channel, details="Member unbanned from the server.")
             await channel.send(command_message("unban", language, "success", member=user.mention))
             await self.refresh_bans(guild)
             return
@@ -2160,14 +2795,16 @@ class General(commands.Cog):
         if name == "kick":
             if not guild.me or not guild.me.guild_permissions.kick_members: raise ValueError("BirdBot needs the Kick Members permission.")
             await member.kick(reason=reason)
-            await self.write_log(guild, "moderation_kick", actor=moderator, target=member, details=f"Reason: {display_reason}")
-            await channel.send(command_message("kick", language, "success", member=member.mention, reason=display_reason))
+            await self.write_log(guild, "moderation_kick", actor=moderator, target=member, channel=channel, details=f"Reason: {display_reason}")
+            if not payload.get("silent"):
+                await channel.send(command_message("kick", language, "success", member=member.mention, reason=display_reason), allowed_mentions=discord.AllowedMentions(users=[member]))
             return
         if name == "ban":
             if not guild.me or not guild.me.guild_permissions.ban_members: raise ValueError("BirdBot needs the Ban Members permission.")
             await member.ban(reason=reason, delete_message_seconds=int(payload.get("delete_message_seconds", 0)))
-            await self.write_log(guild, "moderation_ban", actor=moderator, target=member, details=f"Reason: {display_reason}")
-            await channel.send(command_message("ban", language, "success", member=member.mention, reason=display_reason))
+            await self.write_log(guild, "moderation_ban", actor=moderator, target=member, channel=channel, details=f"Reason: {display_reason}")
+            if not payload.get("silent"):
+                await channel.send(command_message("ban", language, "success", member=member.mention, reason=display_reason), allowed_mentions=discord.AllowedMentions(users=[member]))
             await self.refresh_bans(guild)
             return
         raise ValueError("That dashboard command is not available.")
@@ -2304,7 +2941,7 @@ class General(commands.Cog):
         if problem:
             await ctx.send(problem)
             return
-        warning, dm_delivered, normalized_reason = await self._issue_warning(ctx.guild, member, ctx.author, reason, language)
+        warning, dm_delivered, normalized_reason = await self._issue_warning(ctx.guild, member, ctx.author, reason, language, channel=ctx.channel)
         message = command_message("warning", language, "success", member=member.mention, number=warning["warning_id"], reason=normalized_reason)
         if not dm_delivered:
             message += command_message("warning", language, "dm_failed")
@@ -2329,6 +2966,7 @@ class General(commands.Cog):
             "moderation_unwarning",
             actor=ctx.author,
             target=target or warning,
+            channel=ctx.channel,
             details=f"Warning #{warning['warning_id']} removed.\nOriginal reason: {warning.get('reason') or 'No reason provided.'}",
         )
         member_label = target.mention if target else str(warning.get("member_name") or warning.get("member_id"))
@@ -2352,7 +2990,7 @@ class General(commands.Cog):
         if problem:
             await interaction.followup.send(problem, ephemeral=True)
             return
-        warning, dm_delivered, normalized_reason = await self._issue_warning(interaction.guild, user, interaction.user, reason, language)  # type: ignore[arg-type]
+        warning, dm_delivered, normalized_reason = await self._issue_warning(interaction.guild, user, interaction.user, reason, language, channel=interaction.channel)  # type: ignore[arg-type]
         message = command_message("warning", language, "success", member=user.mention, number=warning["warning_id"], reason=normalized_reason)
         if not dm_delivered:
             message += command_message("warning", language, "dm_failed")
@@ -2379,6 +3017,7 @@ class General(commands.Cog):
             "moderation_unwarning",
             actor=interaction.user,
             target=target or warning,
+            channel=interaction.channel,
             details=f"Warning #{warning['warning_id']} removed.\nOriginal reason: {warning.get('reason') or 'No reason provided.'}",
         )
         member_label = target.mention if target else str(warning.get("member_name") or warning.get("member_id"))
@@ -2406,7 +3045,7 @@ class General(commands.Cog):
         if problem: await ctx.send(problem); return
         await member.kick(reason=reason or f"Requested by {ctx.author}")
         language = str(store.command_config(str(ctx.guild.id), "kick").get("language") or "en")  # type: ignore[union-attr]
-        await self.write_log(ctx.guild, "moderation_kick", actor=ctx.author, target=member, details=f"Reason: {reason or command_message('kick', language, 'no_reason')}")
+        await self.write_log(ctx.guild, "moderation_kick", actor=ctx.author, target=member, channel=ctx.channel, details=f"Reason: {reason or command_message('kick', language, 'no_reason')}")
         await ctx.send(command_message("kick", language, "success", member=member.mention, reason=reason or command_message("kick", language, "no_reason")))
 
     @commands.command(name="ban")
@@ -2416,7 +3055,7 @@ class General(commands.Cog):
         if problem: await ctx.send(problem); return
         await member.ban(reason=reason or f"Requested by {ctx.author}", delete_message_seconds=delete_message_days * 86_400)
         language = str(store.command_config(str(ctx.guild.id), "ban").get("language") or "en")  # type: ignore[union-attr]
-        await self.write_log(ctx.guild, "moderation_ban", actor=ctx.author, target=member, details=f"Reason: {reason or command_message('ban', language, 'no_reason')}")
+        await self.write_log(ctx.guild, "moderation_ban", actor=ctx.author, target=member, channel=ctx.channel, details=f"Reason: {reason or command_message('ban', language, 'no_reason')}")
         await ctx.send(command_message("ban", language, "success", member=member.mention, reason=reason or command_message("ban", language, "no_reason")))
 
     @commands.command(name="timeout")
@@ -2433,8 +3072,37 @@ class General(commands.Cog):
             await ctx.send(command_message("timeout", language, "dashboard_permission"))
             return
         await member.timeout(timedelta(minutes=int(duration_minutes)), reason=reason or f"Requested by {ctx.author}")
-        await self.write_log(ctx.guild, "moderation_timeout", actor=ctx.author, target=member, details=f"Duration: {duration_minutes} minute(s).\nReason: {reason or command_message('timeout', language, 'no_reason')}")
+        await self.write_log(ctx.guild, "moderation_timeout", actor=ctx.author, target=member, channel=ctx.channel, details=f"Duration: {duration_minutes} minute(s).\nReason: {reason or command_message('timeout', language, 'no_reason')}")
         await ctx.send(command_message("timeout", language, "success", member=member.mention, duration=duration_minutes, reason=reason or command_message("timeout", language, "no_reason")), allowed_mentions=discord.AllowedMentions(users=[member]))
+
+    @commands.command(name="mute")
+    @commands.has_guild_permissions(mute_members=True)
+    async def mute(self, ctx: commands.Context[commands.Bot], member: discord.Member, *, reason: str | None = None) -> None:
+        if not ctx.guild:
+            return
+        language = str(store.command_config(str(ctx.guild.id), "mute").get("language") or "en")
+        problem = self.moderation_problem(ctx.guild, member)
+        if problem:
+            await ctx.send(problem)
+            return
+        if not member.voice or not member.voice.channel:
+            await ctx.send(command_message("mute", language, "not_in_voice"))
+            return
+        if not ctx.guild.me or not ctx.guild.me.guild_permissions.mute_members:
+            await ctx.send(command_message("mute", language, "dashboard_permission"))
+            return
+        voice_channel = member.voice.channel
+        display_reason = str(reason or "").strip()[:512] or command_message("mute", language, "no_reason")
+        await member.edit(mute=True, reason=display_reason)
+        await self.write_log(
+            ctx.guild,
+            "moderation_mute",
+            actor=ctx.author,
+            target=member,
+            channel=voice_channel,
+            details=f"Reason: {display_reason}",
+        )
+        await ctx.send(command_message("mute", language, "success", member=member.mention), allowed_mentions=discord.AllowedMentions(users=[member]))
 
     @commands.command(name="lock")
     @commands.has_guild_permissions(manage_channels=True)
@@ -2501,7 +3169,7 @@ class General(commands.Cog):
         if problem: await interaction.followup.send(problem, ephemeral=True); return
         await user.kick(reason=reason or f"Requested by {interaction.user}")
         language = str(store.command_config(str(interaction.guild.id), "kick").get("language") or "en")  # type: ignore[union-attr]
-        await self.write_log(interaction.guild, "moderation_kick", actor=interaction.user, target=user, details=f"Reason: {reason or command_message('kick', language, 'no_reason')}")
+        await self.write_log(interaction.guild, "moderation_kick", actor=interaction.user, target=user, channel=interaction.channel, details=f"Reason: {reason or command_message('kick', language, 'no_reason')}")
         await interaction.followup.send(command_message("kick", language, "success", member=user.mention, reason=reason or command_message("kick", language, "no_reason")), ephemeral=True)
 
     @app_commands.command(name="ban", description="Ban a member from this server.")
@@ -2516,7 +3184,7 @@ class General(commands.Cog):
         if problem: await interaction.followup.send(problem, ephemeral=True); return
         await user.ban(reason=reason or f"Requested by {interaction.user}", delete_message_seconds=delete_message_days * 86_400)
         language = str(store.command_config(str(interaction.guild.id), "ban").get("language") or "en")  # type: ignore[union-attr]
-        await self.write_log(interaction.guild, "moderation_ban", actor=interaction.user, target=user, details=f"Reason: {reason or command_message('ban', language, 'no_reason')}")
+        await self.write_log(interaction.guild, "moderation_ban", actor=interaction.user, target=user, channel=interaction.channel, details=f"Reason: {reason or command_message('ban', language, 'no_reason')}")
         await interaction.followup.send(command_message("ban", language, "success", member=user.mention, reason=reason or command_message("ban", language, "no_reason")), ephemeral=True)
 
     @app_commands.command(name="timeout", description="Temporarily timeout a server member.")
@@ -2538,8 +3206,44 @@ class General(commands.Cog):
             await interaction.followup.send(command_message("timeout", language, "dashboard_permission"), ephemeral=True)
             return
         await user.timeout(timedelta(minutes=int(duration_minutes)), reason=reason or f"Requested by {interaction.user}")
-        await self.write_log(interaction.guild, "moderation_timeout", actor=interaction.user, target=user, details=f"Duration: {duration_minutes} minute(s).\nReason: {reason or command_message('timeout', language, 'no_reason')}")
+        await self.write_log(interaction.guild, "moderation_timeout", actor=interaction.user, target=user, channel=interaction.channel, details=f"Duration: {duration_minutes} minute(s).\nReason: {reason or command_message('timeout', language, 'no_reason')}")
         await interaction.followup.send(command_message("timeout", language, "success", member=user.mention, duration=duration_minutes, reason=reason or command_message("timeout", language, "no_reason")), ephemeral=True, allowed_mentions=discord.AllowedMentions(users=[user]))
+
+    @app_commands.command(name="mute", description="Server-mute a member in their current voice channel.")
+    @app_commands.default_permissions(mute_members=True)
+    @app_commands.describe(user="Member to server-mute", reason="Why the member is being muted")
+    async def slash_mute(self, interaction: discord.Interaction, user: discord.Member, reason: str | None = None) -> None:
+        if not await self.active_interaction(interaction):
+            return
+        if not interaction.guild:
+            return
+        language = str(store.command_config(str(interaction.guild.id), "mute").get("language") or "en")
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not interaction.user.guild_permissions.mute_members:
+            await interaction.followup.send(command_message("mute", language, "permission"), ephemeral=True)
+            return
+        problem = self.moderation_problem(interaction.guild, user)
+        if problem:
+            await interaction.followup.send(problem, ephemeral=True)
+            return
+        if not user.voice or not user.voice.channel:
+            await interaction.followup.send(command_message("mute", language, "not_in_voice"), ephemeral=True)
+            return
+        if not interaction.guild.me or not interaction.guild.me.guild_permissions.mute_members:
+            await interaction.followup.send(command_message("mute", language, "dashboard_permission"), ephemeral=True)
+            return
+        voice_channel = user.voice.channel
+        display_reason = str(reason or "").strip()[:512] or command_message("mute", language, "no_reason")
+        await user.edit(mute=True, reason=display_reason)
+        await self.write_log(
+            interaction.guild,
+            "moderation_mute",
+            actor=interaction.user,
+            target=user,
+            channel=voice_channel,
+            details=f"Reason: {display_reason}",
+        )
+        await interaction.followup.send(command_message("mute", language, "success", member=user.mention), ephemeral=True, allowed_mentions=discord.AllowedMentions(users=[user]))
 
     @app_commands.command(name="lock", description="Lock this channel for @everyone.")
     @app_commands.default_permissions(manage_channels=True)
@@ -2592,11 +3296,12 @@ class General(commands.Cog):
 
     @kick.error
     @ban.error
+    @mute.error
     async def moderation_error(self, ctx: commands.Context[commands.Bot], error: commands.CommandError) -> None:
         command_name = str(ctx.command.qualified_name if ctx.command else "").split(" ", 1)[0]
         arabic = bool(ctx.guild and store.command_config(str(ctx.guild.id), command_name).get("language") == "ar") if command_name else False
         if isinstance(error, commands.MissingPermissions):
-            await ctx.send(command_message("common", "ar" if arabic else "en", "permission"))
+            await ctx.send(command_message(command_name, "ar" if arabic else "en", "permission"))
         elif isinstance(error, commands.MissingRequiredArgument):
             await ctx.send(command_message(command_name, "ar" if arabic else "en", "missing_member"))
         else:

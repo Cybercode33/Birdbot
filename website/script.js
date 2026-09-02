@@ -10,6 +10,10 @@ const actionFeedback = document.getElementById("action-feedback");
 const serverList = document.getElementById("server-list");
 const selectorModal = document.getElementById("selector-modal");
 const confirmModal = document.getElementById("confirm-modal");
+const membersModal = document.getElementById("members-modal");
+const membersModalContent = document.getElementById("members-modal-content");
+const membersModalTitle = document.getElementById("members-title");
+const membersModalCopy = document.getElementById("members-copy");
 const selectorList = document.getElementById("selector-list");
 const selectedServerName = document.getElementById("selected-server-name");
 const selectedServerStatus = document.getElementById("selected-server-status");
@@ -44,6 +48,8 @@ let pendingBlockingRequests = 0;
 const REQUEST_TIMEOUT_MS = 20_000;
 const GET_REQUEST_ATTEMPTS = 2;
 let managementData = null;
+let membersPanelGuild = null;
+let membersPanelRecords = [];
 let currentUser = null;
 let ticketPageMode = "config";
 let activeManagementTab = "commands";
@@ -59,6 +65,9 @@ let guildLogsRefreshInFlight = false;
 let guildLogsQuery = "";
 let guildLogsSnapshot = null;
 let ticketServerClockOffsetMs = 0;
+let tempVCRefreshTimer = null;
+let tempVCRefreshInFlight = false;
+let tempVCRefreshPending = false;
 // Responses fetched by the readiness gate are reused by the first render so
 // navigation never performs the same Discord/Spotify request twice.
 const preloadCache = new Map();
@@ -68,6 +77,22 @@ function textElement(tag, className, text) {
   element.className = className;
   element.textContent = text;
   return element;
+}
+
+function transcriptLink(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  // Old ticket rows may contain the previous Render/Replit hostname. Keep
+  // the generated filename but serve it from the host currently displaying
+  // the dashboard, so moving hosts does not break existing transcripts.
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    const match = parsed.pathname.match(/^\/uploads\/transcripts\/([A-Za-z0-9._-]+\.html)$/i);
+    if (match) return "/uploads/transcripts/" + encodeURIComponent(match[1]);
+  } catch (_) {
+    // Fall through to the original value for malformed legacy records.
+  }
+  return raw;
 }
 
 function formatTicketCountdown(totalSeconds) {
@@ -215,6 +240,7 @@ async function loadMusicGuildChoice() {
 function closeModals() {
   selectorModal.hidden = true;
   confirmModal.hidden = true;
+  if (membersModal) membersModal.hidden = true;
   activationError.textContent = "";
 }
 
@@ -422,6 +448,20 @@ function renderGuilds(guilds) {
       stateButton.addEventListener("click", () => openConfirmation(guild, active ? "disable" : "enable"));
       actions.append(stateButton);
     }
+    // Keep the member action in the same far-right action area for every
+    // server.  An inactive server cannot be queried or moderated until the
+    // owner enables BirdBot, so show the affordance but make that state clear.
+    const membersButton = document.createElement("button");
+    membersButton.className = "secondary-button members-button";
+    membersButton.type = "button";
+    membersButton.textContent = "Show Members";
+    membersButton.disabled = !active;
+    if (active) {
+      membersButton.addEventListener("click", () => { void showMembers(guild); });
+    } else {
+      membersButton.title = "Enable BirdBot first";
+    }
+    actions.append(membersButton);
     if (active) {
       const manageButton = document.createElement("button");
       manageButton.className = "secondary-button";
@@ -446,6 +486,183 @@ function renderGuilds(guilds) {
     card.append(identity, status, actions);
     serverList.append(card);
   });
+}
+
+function memberDisplayName(member) {
+  return String(member?.display_name || member?.global_name || member?.username || member?.member_id || "Unknown member");
+}
+
+function memberJoinedLabel(member) {
+  if (!member?.joined_at) return "Joined date unavailable";
+  const parsed = new Date(member.joined_at);
+  return Number.isNaN(parsed.getTime()) ? "Joined date unavailable" : "Joined " + parsed.toLocaleString();
+}
+
+function renderMembersPanel(query = "") {
+  if (!membersModalContent) return;
+  const normalized = String(query || "").trim().toLowerCase();
+  const visible = membersPanelRecords.filter((member) => !normalized || [
+    memberDisplayName(member), member.username, member.global_name, member.member_id,
+    ...(Array.isArray(member.roles) ? member.roles : []),
+  ].filter(Boolean).join(" ").toLowerCase().includes(normalized));
+  membersModalContent.replaceChildren();
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "members-toolbar";
+  const search = document.createElement("input");
+  search.type = "search";
+  search.className = "channel-select members-search";
+  search.placeholder = "Search members by name or ID";
+  search.value = query;
+  search.addEventListener("input", () => renderMembersPanel(search.value));
+  const count = textElement("span", "members-count", visible.length + " of " + membersPanelRecords.length + " members");
+  toolbar.append(search, count);
+
+  const bulk = document.createElement("div");
+  bulk.className = "members-bulk-actions";
+  [["kick", "Kick All", "danger-button"], ["ban", "Ban All", "danger-button"], ["timeout", "Timeout All", "secondary-button"]].forEach(([action, label, className]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = className;
+    button.textContent = label;
+    button.addEventListener("click", () => { void runMembersAction(action, null, true); });
+    bulk.append(button);
+  });
+  toolbar.append(bulk);
+
+  const list = document.createElement("div");
+  list.className = "members-list";
+  if (!visible.length) list.append(textElement("p", "empty-state", normalized ? "No matching members." : "No members were returned."));
+  visible.forEach((member) => {
+    const row = document.createElement("article");
+    row.className = "member-row";
+    const identity = document.createElement("div");
+    identity.className = "member-row-identity";
+    if (member.avatar_url) {
+      const avatar = document.createElement("img");
+      avatar.className = "member-row-avatar";
+      avatar.src = member.avatar_url;
+      avatar.alt = "";
+      avatar.loading = "lazy";
+      avatar.addEventListener("error", () => avatar.remove(), { once: true });
+      identity.append(avatar);
+    } else {
+      identity.append(textElement("span", "member-row-avatar member-row-fallback", memberDisplayName(member).charAt(0).toUpperCase() || "?"));
+    }
+    const details = document.createElement("div");
+    details.className = "member-row-details";
+    details.append(
+      textElement("strong", "", memberDisplayName(member)),
+      textElement("small", "", "@" + (member.username || member.global_name || "unknown") + " · ID: " + member.member_id),
+      textElement("small", "", memberJoinedLabel(member)),
+      textElement("small", "", "Roles: " + (Array.isArray(member.roles) && member.roles.length ? member.roles.join(", ") : "None") + (member.is_bot ? " · Bot account" : "")),
+    );
+    identity.append(details);
+    const actions = document.createElement("div");
+    actions.className = "member-row-actions";
+    [["kick", "Kick", "danger-button"], ["ban", "Ban", "danger-button"], ["timeout", "Timeout", "secondary-button"]].forEach(([action, label, className]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = className;
+      button.textContent = label;
+      button.disabled = Boolean(member.is_bot);
+      button.title = member.is_bot ? "Bot accounts are protected" : "";
+      button.addEventListener("click", () => { void runMembersAction(action, member, false); });
+      actions.append(button);
+    });
+    row.append(identity, actions);
+    list.append(row);
+  });
+  membersModalContent.append(toolbar, list);
+}
+
+async function runMembersAction(action, member = null, bulk = false) {
+  if (!membersPanelGuild || !membersPanelContext?.channels?.length) {
+    actionFeedback.hidden = false;
+    actionFeedback.textContent = "BirdBot cannot access a text channel for this action.";
+    return;
+  }
+  const candidates = (bulk ? membersPanelRecords : [member]).filter((item) => item && !item.is_bot);
+  if (!candidates.length) return;
+  const label = bulk ? action + " all eligible members" : action + " " + memberDisplayName(candidates[0]);
+  if (!window.confirm("Confirm " + label + "? Discord permissions and role hierarchy still apply.")) return;
+  let reason = "Dashboard member action";
+  membersPanelActionDuration = 10;
+  if (action === "timeout") {
+    const durationText = window.prompt("Timeout duration in minutes (1-40320):", "10");
+    if (durationText === null) return;
+    const duration = Number(durationText);
+    if (!Number.isInteger(duration) || duration < 1 || duration > 40320) {
+      actionFeedback.hidden = false;
+      actionFeedback.textContent = "Enter a timeout duration between 1 and 40,320 minutes.";
+      return;
+    }
+    membersPanelActionDuration = duration;
+  }
+  const reasonText = window.prompt("Reason (optional):", "");
+  if (reasonText !== null && reasonText.trim()) reason = reasonText.trim().slice(0, 512);
+  if (candidates.length > 500 && !window.confirm("This will queue the first 500 eligible members to avoid Discord rate limits. Continue?")) return;
+  const targets = candidates.slice(0, 500);
+  beginLoading("Queuing " + action + " action" + (bulk ? "s" : "") + "...");
+  try {
+    const channelId = String(membersPanelContext.channels[0].id);
+    const queued = await Promise.all(targets.map((target) => requestJson(
+      "/api/guilds/" + encodeURIComponent(membersPanelGuild.id) + "/commands/" + action,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channel_id: channelId, member_id: target.member_id, reason, silent: true, duration_minutes: membersPanelActionDuration }),
+      },
+    )));
+    if (bulk) {
+      const queuedMessage = action + " queued for " + queued.length + " eligible member" + (queued.length === 1 ? "" : "s") + ". Discord will process the actions in order and the moderation log will record each result.";
+      if (membersModalCopy) membersModalCopy.textContent = queuedMessage;
+      actionFeedback.hidden = false;
+      actionFeedback.textContent = queuedMessage;
+      return;
+    }
+    const results = await Promise.all(queued.map((request) => waitForDashboardCommand(request.request_id, 80).catch((error) => ({ status: "failed", error: errorMessage(error, "Action failed.") }))));
+    const succeeded = results.filter((result) => result.status === "complete").length;
+    const failed = results.length - succeeded;
+    if (membersModalCopy) membersModalCopy.textContent = action + " completed for " + succeeded + " member" + (succeeded === 1 ? "" : "s") + (failed ? "; " + failed + " could not be processed." : ".");
+    actionFeedback.hidden = false;
+    actionFeedback.textContent = action + " completed for " + succeeded + " member" + (succeeded === 1 ? "" : "s") + (failed ? "; " + failed + " could not be processed." : ".");
+    const refreshed = await requestJson("/api/guilds/" + encodeURIComponent(membersPanelGuild.id) + "/members", { cache: "no-store" });
+    membersPanelRecords = refreshed.members || [];
+    renderMembersPanel("");
+  } catch (error) {
+    if (membersModalCopy) membersModalCopy.textContent = errorMessage(error, "The member action could not be queued.");
+    actionFeedback.hidden = false;
+    actionFeedback.textContent = errorMessage(error, "The member action could not be queued.");
+  } finally {
+    endLoading();
+  }
+}
+
+let membersPanelContext = null;
+let membersPanelActionDuration = 10;
+
+async function showMembers(guild) {
+  if (!guild?.id || !membersModal) return;
+  beginLoading("Loading server members...");
+  try {
+    const [management, roster] = await Promise.all([
+      requestJson("/api/guilds/" + encodeURIComponent(guild.id) + "/manage", { cache: "no-store" }),
+      requestJson("/api/guilds/" + encodeURIComponent(guild.id) + "/members", { cache: "no-store" }),
+    ]);
+    membersPanelGuild = guild;
+    membersPanelContext = management;
+    membersPanelRecords = roster.members || [];
+    membersModalTitle.textContent = guild.name + " members";
+    membersModalCopy.textContent = "Review member details or run a moderation action. Bot accounts are protected; Discord permissions and role hierarchy are enforced.";
+    renderMembersPanel("");
+    membersModal.hidden = false;
+  } catch (error) {
+    actionFeedback.hidden = false;
+    actionFeedback.textContent = errorMessage(error, "Server members could not be loaded.");
+  } finally {
+    endLoading();
+  }
 }
 
 function renderDashboard(data) {
@@ -486,6 +703,7 @@ function renderManagedServer(guild) {
 }
 
 function renderControlPanel() {
+  stopTempVCRefresh();
   commandGrid.replaceChildren();
   commandFeedback.hidden = true;
   const grid = document.createElement("section");
@@ -495,20 +713,27 @@ function renderControlPanel() {
   const channels = Array.isArray(managementData?.channels) ? managementData.channels.length : 0;
   const roles = Array.isArray(managementData?.roles) ? managementData.roles.length : 0;
   const autoReactRules = Array.isArray(managementData?.auto_reacts) ? managementData.auto_reacts.length : 0;
+  const tempVCEnabled = Boolean(managementData?.temp_vc?.enabled);
+  const vcPremium = managementData?.vc_premium !== false;
+  const automodEnabled = Boolean(managementData?.automod?.enabled);
+  const automodFeatureCount = ["anti_link", "anti_spam", "banned_words", "raid_protection", "auto_warning", "auto_timeout"]
+    .filter((key) => Boolean(managementData?.automod?.[key])).length;
   const cards = [
     ["Server message", "Configure automated server announcements."],
     ["Roles", `${roles.toLocaleString()} roles available to manage.`],
     ["Channels", `${channels.toLocaleString()} channels available to manage.`],
-    ["VC", "Manage voice-channel and connection settings."],
+    ["Temp VC", tempVCEnabled ? "Temporary voice rooms are enabled." : "Enable and manage temporary voice rooms."],
     ["DM's Messages", "Configure private messages sent by BirdBot."],
-    ["Bot Settings", `${autoReactRules.toLocaleString()} auto-react rule${autoReactRules === 1 ? "" : "s"} configured.`],
+    ["Bot Settings", `${automodEnabled ? `${automodFeatureCount} Automod rule${automodFeatureCount === 1 ? "" : "s"} enabled` : "Automod disabled"} · ${autoReactRules.toLocaleString()} auto-react rule${autoReactRules === 1 ? "" : "s"} configured.`],
     ["Bot profile", "Customize BirdBot's profile and presence."],
+    ["VC", vcPremium ? "Premium feature · place secure, host-configured bots in voice channels." : "Premium feature · unlock voice presence controls."],
   ];
 
   cards.forEach(([title, description], index) => {
     const card = document.createElement("article");
     card.className = "control-panel-card";
-    const isReady = [0, 1, 4, 5, 6].includes(index);
+    if (index === 7) card.classList.add("control-panel-card-premium");
+    const isReady = [0, 1, 3, 4, 5, 6, 7].includes(index);
     if (isReady) {
       card.classList.add("control-panel-card-action");
       card.tabIndex = 0;
@@ -517,9 +742,11 @@ function renderControlPanel() {
       const open = () => {
         if (index === 0) return renderServerMessagePanel();
         if (index === 1) return renderRolesPanel();
+        if (index === 3) return renderTempVCPanel();
         if (index === 4) return renderDMMessagePanel();
         if (index === 5) return renderBotSettingsPanel();
-        return renderBotProfilePanel();
+        if (index === 6) return renderBotProfilePanel();
+        return vcPremium ? renderVCPresencePanel() : renderVCPremiumPanel();
       };
       card.addEventListener("click", open);
       card.addEventListener("keydown", (event) => {
@@ -529,10 +756,11 @@ function renderControlPanel() {
         }
       });
     }
+    if (index === 7) card.append(textElement("span", "control-panel-card-premium-badge", "Premium feature"));
     card.append(
       textElement("h3", "control-panel-card-title", title),
       textElement("p", "control-panel-card-copy", description),
-      textElement("span", "control-panel-card-status", index === 0 ? "Open composer" : index === 1 ? "Manage roles" : index === 4 ? "Open composer" : index === 5 ? "Configure rules" : "Edit profile"),
+      textElement("span", "control-panel-card-status", index === 0 ? "Open composer" : index === 1 ? "Manage roles" : index === 3 ? "Configure rooms" : index === 4 ? "Open composer" : index === 5 ? "Configure rules" : index === 6 ? "Edit profile" : vcPremium ? "Premium · Manage voice bots" : "Premium required"),
     );
     grid.append(card);
   });
@@ -551,6 +779,452 @@ async function waitForDashboardCommand(requestId, attempts = 40) {
     if (state.status === "failed") throw new Error(state.error || "BirdBot could not send that message.");
   }
   return { status: "pending" };
+}
+
+function stopTempVCRefresh() {
+  if (tempVCRefreshTimer !== null) {
+    window.clearInterval(tempVCRefreshTimer);
+    tempVCRefreshTimer = null;
+  }
+  tempVCRefreshPending = false;
+}
+
+async function refreshTempVCPanel() {
+  if (document.hidden || managementView.hidden || activeManagementTab !== "control" || !commandGrid.querySelector(".temp-vc-panel") || tempVCRefreshInFlight || pendingRequests > 0) return;
+  tempVCRefreshInFlight = true;
+  try {
+    const fresh = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/control/temp-vc`, { cache: "no-store", skipPreload: true });
+    if (activeManagementTab !== "control" || !commandGrid.querySelector(".temp-vc-panel")) return;
+    const previous = JSON.stringify({ config: managementData.temp_vc || {}, channels: managementData.temp_vc_channels || [], voice: managementData.voice_channels || [] });
+    const next = JSON.stringify({ config: fresh.config || {}, channels: fresh.channels || [], voice: fresh.voice_channels || [] });
+    if (previous === next) return;
+    managementData = {
+      ...managementData,
+      temp_vc: fresh.config || managementData.temp_vc,
+      temp_vc_channels: fresh.channels || [],
+      voice_channels: fresh.voice_channels || managementData.voice_channels,
+      categories: fresh.categories || managementData.categories,
+    };
+    const activeElement = document.activeElement;
+    const panel = commandGrid.querySelector(".temp-vc-panel");
+    if (panel && activeElement && panel.contains(activeElement)) {
+      tempVCRefreshPending = true;
+      return;
+    }
+    tempVCRefreshPending = false;
+    renderTempVCPanel();
+  } catch (_) {
+    // A transient poll failure should not interrupt an open form. The next
+    // interval will retry automatically.
+  } finally {
+    tempVCRefreshInFlight = false;
+  }
+}
+
+function startTempVCRefresh() {
+  stopTempVCRefresh();
+  tempVCRefreshTimer = window.setInterval(() => { void refreshTempVCPanel(); }, 2_000);
+}
+
+function renderTempVCPanel() {
+  stopTempVCRefresh();
+  commandGrid.replaceChildren();
+  commandFeedback.hidden = true;
+  const panel = document.createElement("section");
+  panel.className = "temp-vc-panel";
+  panel.setAttribute("aria-labelledby", "temp-vc-title");
+  const heading = document.createElement("div");
+  heading.className = "temp-vc-heading";
+  heading.append(
+    textElement("h3", "temp-vc-title", "Temporary voice channels"),
+    textElement("p", "temp-vc-copy", "Choose a lobby. BirdBot creates a temporary room when someone joins and removes it when everyone leaves. Active rooms update automatically."),
+  );
+  const config = managementData?.temp_vc || {};
+  const form = document.createElement("form");
+  form.className = "temp-vc-config-form";
+  form.noValidate = true;
+  const enabledField = document.createElement("label");
+  enabledField.className = "temp-vc-enable-field";
+  const enabled = document.createElement("input");
+  enabled.type = "checkbox";
+  enabled.checked = Boolean(config.enabled);
+  enabledField.append(enabled, textElement("span", "", "Enable Temp VC"));
+  const lobbySelect = document.createElement("select");
+  lobbySelect.className = "channel-select";
+  lobbySelect.append(new Option("Choose a voice lobby", ""));
+  (managementData?.voice_channels || []).forEach((channel) => lobbySelect.append(new Option(`🔊 ${channel.name}`, channel.id)));
+  lobbySelect.value = String(config.lobby_channel_id || "");
+  const categorySelect = document.createElement("select");
+  categorySelect.className = "channel-select";
+  categorySelect.append(new Option("Use the lobby category", ""));
+  (managementData?.categories || []).forEach((category) => categorySelect.append(new Option(category.name, category.id)));
+  categorySelect.value = String(config.category_id || "");
+  const templateInput = document.createElement("input");
+  templateInput.className = "channel-select";
+  templateInput.type = "text";
+  templateInput.maxLength = 100;
+  templateInput.value = String(config.channel_name_template || "{owner}'s room");
+  templateInput.placeholder = "{owner}'s room";
+  const limitInput = document.createElement("input");
+  limitInput.className = "channel-select";
+  limitInput.type = "number";
+  limitInput.min = "0";
+  limitInput.max = "99";
+  limitInput.step = "1";
+  limitInput.value = String(config.user_limit ?? 0);
+  const save = textElement("button", "primary-button temp-vc-save", "Save Temp VC settings");
+  save.type = "submit";
+  const configStatus = textElement("span", "temp-vc-status", "");
+  form.append(
+    enabledField,
+    labeledControl("Lobby voice channel", lobbySelect),
+    labeledControl("Category (optional)", categorySelect),
+    labeledControl("Channel name ({owner} or {username})", templateInput),
+    labeledControl("User limit (0 = unlimited)", limitInput),
+    save,
+    configStatus,
+  );
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (save.disabled) return;
+    save.disabled = true;
+    configStatus.textContent = "Saving...";
+    configStatus.className = "temp-vc-status is-loading";
+    try {
+      const result = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/control/temp-vc`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: enabled.checked,
+          lobby_channel_id: lobbySelect.value || null,
+          category_id: categorySelect.value || null,
+          channel_name_template: templateInput.value,
+          user_limit: limitInput.value,
+        }),
+      });
+      managementData.temp_vc = result.config || managementData.temp_vc;
+      managementData.temp_vc_channels = result.channels || managementData.temp_vc_channels || [];
+      configStatus.textContent = "Saved. New rooms will use these settings.";
+      configStatus.className = "temp-vc-status is-success";
+    } catch (error) {
+      configStatus.textContent = errorMessage(error, "Temp VC settings could not be saved.");
+      configStatus.className = "temp-vc-status is-error";
+    } finally {
+      save.disabled = false;
+    }
+  });
+
+  const activeChannels = Array.isArray(managementData?.temp_vc_channels) ? managementData.temp_vc_channels : [];
+  const activeHeading = document.createElement("div");
+  activeHeading.className = "temp-vc-section-heading";
+  const activeMeta = document.createElement("div");
+  activeMeta.className = "temp-vc-section-meta";
+  activeMeta.append(
+    textElement("span", "temp-vc-live-indicator", "Live"),
+    textElement("span", "temp-vc-count", `${activeChannels.length} room${activeChannels.length === 1 ? "" : "s"}`),
+  );
+  activeHeading.append(
+    textElement("h4", "", "Active temporary rooms"),
+    activeMeta,
+  );
+  const list = document.createElement("div");
+  list.className = "temp-vc-channel-list";
+  const queueAction = async (payload, button) => {
+    if (button?.disabled) return;
+    if (button) {
+      button.disabled = true;
+      button.dataset.originalLabel = button.textContent || "Working...";
+      button.textContent = "Working...";
+    }
+    beginLoading("Updating temporary voice channel...", true);
+    try {
+      const queued = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/control/temp-vc/action`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await waitForDashboardCommand(queued.request_id);
+      if (result.status === "pending") throw new Error("BirdBot is still processing that action. Refresh the panel in a moment.");
+      const fresh = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/manage`, { cache: "no-store" });
+      managementData = { ...managementData, ...fresh };
+      renderTempVCPanel();
+    } catch (error) {
+      commandFeedback.hidden = false;
+      commandFeedback.textContent = errorMessage(error, "Temp VC action failed.");
+      if (button) {
+        button.disabled = false;
+        button.textContent = button.dataset.originalLabel || "Try again";
+      }
+    } finally {
+      endLoading(true);
+    }
+  };
+  if (!activeChannels.length) {
+    list.append(textElement("p", "temp-vc-empty", "No temporary rooms are active right now."));
+  } else {
+    activeChannels.forEach((room) => {
+      const card = document.createElement("article");
+      card.className = "temp-vc-channel-card";
+      const info = document.createElement("div");
+      info.className = "temp-vc-channel-info";
+      const marker = textElement("span", "temp-vc-channel-marker", "VC");
+      marker.setAttribute("aria-hidden", "true");
+      const infoCopy = document.createElement("div");
+      infoCopy.className = "temp-vc-channel-copy";
+      const state = textElement("span", `temp-vc-state ${room.locked ? "is-locked" : "is-open"}`, room.locked ? "Locked" : "Open");
+      info.append(
+        marker,
+        infoCopy,
+        state,
+      );
+      infoCopy.append(
+        textElement("strong", "", room.channel_name || "Temporary room"),
+        textElement("span", "", `Owner: ${room.owner_name || room.owner_id || "Unknown"} · ${(room.blocked_user_ids || []).length} blocked`),
+      );
+      const targetPicker = createMemberSelect();
+      targetPicker.element.classList.add("temp-vc-target-picker");
+      let targetSearchTimer = null;
+      targetPicker.search.addEventListener("input", () => {
+        window.clearTimeout(targetSearchTimer);
+        targetSearchTimer = window.setTimeout(() => searchMembers(targetPicker.search.value, targetPicker.select), 180);
+      });
+      const actionBar = document.createElement("div");
+      actionBar.className = "temp-vc-action-bar";
+      const roomControls = document.createElement("div");
+      roomControls.className = "temp-vc-room-controls";
+      const nameTool = document.createElement("div");
+      nameTool.className = "temp-vc-tool";
+      nameTool.append(textElement("span", "temp-vc-tool-label", "Room name"));
+      const renameInput = document.createElement("input");
+      renameInput.className = "channel-select";
+      renameInput.maxLength = 100;
+      renameInput.placeholder = "New room name";
+      const rename = textElement("button", "secondary-button", "Rename");
+      rename.type = "button";
+      rename.addEventListener("click", () => queueAction({ action: "rename", channel_id: room.channel_id, name: renameInput.value }, rename));
+      const nameInline = document.createElement("div");
+      nameInline.className = "temp-vc-tool-inline temp-vc-name-inline";
+      nameInline.append(renameInput, rename);
+      nameTool.append(nameInline);
+      const limitTool = document.createElement("div");
+      limitTool.className = "temp-vc-tool";
+      limitTool.append(textElement("span", "temp-vc-tool-label", "Member limit"));
+      const roomLimit = document.createElement("input");
+      roomLimit.className = "channel-select temp-vc-limit-input";
+      roomLimit.type = "number";
+      roomLimit.min = "0";
+      roomLimit.max = "99";
+      const liveVoiceChannel = (managementData?.voice_channels || []).find((voiceChannel) => String(voiceChannel.id) === String(room.channel_id));
+      roomLimit.value = String(liveVoiceChannel?.user_limit ?? 0);
+      const setLimit = textElement("button", "secondary-button", "Set limit");
+      setLimit.type = "button";
+      setLimit.addEventListener("click", () => queueAction({ action: "limit", channel_id: room.channel_id, user_limit: roomLimit.value }, setLimit));
+      const limitInline = document.createElement("div");
+      limitInline.className = "temp-vc-tool-inline";
+      limitInline.append(roomLimit, setLimit);
+      limitTool.append(limitInline);
+      const lock = textElement("button", "secondary-button", room.locked ? "Unlock" : "Lock");
+      lock.type = "button";
+      lock.addEventListener("click", () => queueAction({ action: room.locked ? "unlock" : "lock", channel_id: room.channel_id }, lock));
+      const lockTool = document.createElement("div");
+      lockTool.className = "temp-vc-tool temp-vc-lock-tool";
+      lockTool.append(textElement("span", "temp-vc-tool-label", "Access"), lock);
+      roomControls.append(nameTool, limitTool, lockTool);
+      const memberControls = document.createElement("div");
+      memberControls.className = "temp-vc-member-controls";
+      const memberHeading = textElement("span", "temp-vc-tool-label", "Member actions");
+      memberHeading.classList.add("temp-vc-member-heading");
+      memberControls.append(memberHeading, targetPicker.element);
+      const block = textElement("button", "secondary-button", "Block");
+      block.type = "button";
+      block.addEventListener("click", () => queueAction({ action: "block", channel_id: room.channel_id, member_id: targetPicker.select.value }, block));
+      const unblock = textElement("button", "secondary-button", "Unblock");
+      unblock.type = "button";
+      unblock.addEventListener("click", () => queueAction({ action: "unblock", channel_id: room.channel_id, member_id: targetPicker.select.value }, unblock));
+      const transfer = textElement("button", "secondary-button", "Transfer owner");
+      transfer.type = "button";
+      transfer.addEventListener("click", () => queueAction({ action: "transfer", channel_id: room.channel_id, member_id: targetPicker.select.value }, transfer));
+      const kick = textElement("button", "secondary-button", "Kick");
+      kick.type = "button";
+      kick.addEventListener("click", () => queueAction({ action: "kick", channel_id: room.channel_id, member_id: targetPicker.select.value }, kick));
+      memberControls.append(block, unblock, transfer, kick);
+      actionBar.append(roomControls, memberControls);
+      card.append(info, actionBar);
+      list.append(card);
+    });
+  }
+  const actions = document.createElement("div");
+  actions.className = "temp-vc-footer-actions";
+  const back = textElement("button", "secondary-button", "Back to Control Panel");
+  back.type = "button";
+  back.addEventListener("click", () => renderControlPanel());
+  actions.append(back);
+  panel.append(heading, form, activeHeading, list, actions);
+  panel.addEventListener("focusout", () => {
+    window.queueMicrotask(() => {
+      if (tempVCRefreshPending && !panel.contains(document.activeElement)) {
+        tempVCRefreshPending = false;
+        renderTempVCPanel();
+      }
+    });
+  });
+  commandGrid.append(panel);
+  startTempVCRefresh();
+}
+
+function renderVCPremiumPanel() {
+  stopTempVCRefresh();
+  commandGrid.replaceChildren();
+  commandFeedback.hidden = true;
+  const panel = document.createElement("section");
+  panel.className = "vc-presence-panel vc-premium-panel";
+  panel.setAttribute("aria-labelledby", "vc-premium-title");
+  const heading = document.createElement("div");
+  heading.className = "vc-presence-heading";
+  heading.append(
+    textElement("span", "vc-presence-slot-label", "Premium feature"),
+    textElement("h3", "vc-premium-title", "VC voice presence"),
+    textElement("p", "vc-presence-copy", "The VC control panel lets you place secure presence bots in your server's voice channels. It is available on premium accounts."),
+  );
+  const note = textElement("p", "vc-presence-security", "Ask the BirdBot owner or support team to activate premium access for your Discord account. Bot tokens remain private and are never entered here.");
+  const back = textElement("button", "secondary-button", "Back to Control Panel");
+  back.type = "button";
+  back.addEventListener("click", () => renderControlPanel());
+  panel.append(heading, note, back);
+  commandGrid.append(panel);
+}
+
+function renderVCPresencePanel() {
+  stopTempVCRefresh();
+  commandGrid.replaceChildren();
+  commandFeedback.hidden = true;
+  const panel = document.createElement("section");
+  panel.className = "vc-presence-panel";
+  panel.setAttribute("aria-labelledby", "vc-presence-title");
+  const heading = document.createElement("div");
+  heading.className = "vc-presence-heading";
+  heading.append(
+    textElement("h3", "vc-presence-title", "VC"),
+    textElement("p", "vc-presence-copy", "Keep up to five dedicated presence bots in voice channels. Each slot is configured by the host and can be placed separately in this server."),
+  );
+  const security = textElement("p", "vc-presence-security", "Security: bot tokens are never entered, stored, or shown on this website. The host must add VC_BOT_1_TOKEN through VC_BOT_5_TOKEN as private secrets, and invite each bot with Connect and Speak permissions." );
+  const status = textElement("p", "vc-presence-load-status", "Loading voice bot status...");
+  const list = document.createElement("div");
+  list.className = "vc-presence-list";
+
+  const renderSlots = (data) => {
+    const slots = Array.isArray(data?.slots) ? data.slots : [];
+    const configs = Array.isArray(data?.configs) ? data.configs : [];
+    const channels = Array.isArray(data?.voice_channels) ? data.voice_channels : [];
+    list.replaceChildren();
+    for (let number = 1; number <= 5; number += 1) {
+      const slot = slots.find((item) => Number(item.slot) === number) || {};
+      const config = configs.find((item) => Number(item.slot) === number) || {};
+      const configured = Boolean(slot.configured);
+      const card = document.createElement("article");
+      card.className = "vc-presence-card";
+      const cardHeader = document.createElement("div");
+      cardHeader.className = "vc-presence-card-header";
+      const botCopy = document.createElement("div");
+      botCopy.className = "vc-presence-bot-copy";
+      botCopy.append(
+        textElement("span", "vc-presence-slot-label", `Slot ${number}`),
+        textElement("strong", "", configured ? (slot.bot_name || `Presence bot ${number}`) : "Not configured on host"),
+        textElement("small", "", configured
+          ? `${slot.online ? "Online" : "Connecting"} · ${Number(slot.guild_count || 0).toLocaleString()} server${Number(slot.guild_count || 0) === 1 ? "" : "s"}`
+          : `Add VC_BOT_${number}_TOKEN as a private secret.`),
+      );
+      const state = textElement("span", `vc-presence-state ${slot.online ? "is-online" : ""}`, configured ? (slot.connected ? "In call" : slot.online ? "Online" : "Offline") : "Setup needed");
+      cardHeader.append(botCopy, state);
+      const form = document.createElement("form");
+      form.className = "vc-presence-form";
+      form.noValidate = true;
+      const enableLabel = document.createElement("label");
+      enableLabel.className = "vc-presence-enable";
+      const enable = document.createElement("input");
+      enable.type = "checkbox";
+      enable.checked = Boolean(slot.enabled || config.enabled);
+      enable.disabled = !configured;
+      enableLabel.append(enable, textElement("span", "", "Place this bot in a voice channel"));
+      const channelSelect = document.createElement("select");
+      channelSelect.className = "channel-select";
+      channelSelect.append(new Option("Choose a voice channel", ""));
+      channels.forEach((channel) => channelSelect.append(new Option(`🔊 ${channel.name}`, channel.id)));
+      channelSelect.value = String(slot.channel_id || config.channel_id || "");
+      channelSelect.disabled = !configured;
+      const save = textElement("button", "primary-button vc-presence-save", enable.checked ? "Save placement" : "Leave voice");
+      save.type = "submit";
+      save.disabled = !configured;
+      const feedback = textElement("span", "vc-presence-feedback", slot.error || (configured ? "" : "This slot is waiting for a private host secret."));
+      feedback.classList.toggle("is-error", Boolean(slot.error));
+      enable.addEventListener("change", () => { save.textContent = enable.checked ? "Save & join" : "Leave voice"; });
+      form.append(enableLabel, labeledControl("Voice channel", channelSelect), save, feedback);
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (save.disabled) return;
+        save.disabled = true;
+        enable.disabled = true;
+        channelSelect.disabled = true;
+        feedback.className = "vc-presence-feedback is-loading";
+        feedback.textContent = "Saving placement...";
+        beginLoading("Updating VC presence bot...", true);
+        try {
+          const result = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/control/vc`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ slot: number, enabled: enable.checked, channel_id: channelSelect.value || null }),
+          });
+          const command = await waitForDashboardCommand(result.request_id);
+          if (command.status === "pending") throw new Error("BirdBot is still processing that placement. Refresh status in a moment.");
+          const fresh = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/control/vc`, { cache: "no-store" });
+          managementData.vc_presence = fresh.configs || managementData.vc_presence;
+          managementData.voice_channels = fresh.voice_channels || managementData.voice_channels;
+          status.textContent = "Status updated.";
+          renderSlots(fresh);
+        } catch (error) {
+          feedback.className = "vc-presence-feedback is-error";
+          feedback.textContent = errorMessage(error, "VC bot placement could not be saved.");
+          save.disabled = false;
+          enable.disabled = !configured;
+          channelSelect.disabled = !configured;
+        } finally {
+          endLoading(true);
+        }
+      });
+      card.append(cardHeader, form);
+      list.append(card);
+    }
+  };
+
+  const load = async () => {
+    status.className = "vc-presence-load-status is-loading";
+    status.textContent = "Loading voice bot status...";
+    try {
+      const data = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/control/vc`, { cache: "no-store", skipPreload: true });
+      if (!commandGrid.contains(panel)) return;
+      managementData.vc_presence = data.configs || managementData.vc_presence;
+      managementData.voice_channels = data.voice_channels || managementData.voice_channels;
+      renderSlots(data);
+      status.className = "vc-presence-load-status";
+      status.textContent = "Live status · refresh whenever a host bot reconnects.";
+    } catch (error) {
+      status.className = "vc-presence-load-status is-error";
+      status.textContent = errorMessage(error, "VC bot status could not be loaded.");
+      renderSlots({ configs: managementData.vc_presence, voice_channels: managementData.voice_channels });
+    }
+  };
+  const actions = document.createElement("div");
+  actions.className = "vc-presence-actions";
+  const refresh = textElement("button", "secondary-button", "Refresh status");
+  refresh.type = "button";
+  refresh.addEventListener("click", () => { void load(); });
+  const back = textElement("button", "secondary-button", "Back to Control Panel");
+  back.type = "button";
+  back.addEventListener("click", () => renderControlPanel());
+  actions.append(refresh, back);
+  panel.append(heading, security, status, list, actions);
+  commandGrid.append(panel);
+  void load();
 }
 
 function renderServerMessagePanel() {
@@ -1147,8 +1821,215 @@ function renderBotSettingsPanel() {
   heading.className = "server-message-heading";
   heading.append(
     textElement("h3", "server-message-title", "Bot Settings"),
-    textElement("p", "server-message-copy", "Configure automatic reactions. Each rule watches one channel and can use a Unicode or custom Discord emoji."),
+    textElement("p", "server-message-copy", "Configure Automod and automatic reactions. Settings apply only to this server."),
   );
+  const automod = managementData.automod || {};
+  const automodSection = document.createElement("section");
+  automodSection.className = "automod-settings-card";
+  automodSection.setAttribute("aria-labelledby", "automod-settings-title");
+  const automodHeader = document.createElement("div");
+  automodHeader.className = "automod-settings-header";
+  const automodCopy = document.createElement("div");
+  automodCopy.className = "automod-settings-copy";
+  const automodTitle = textElement("strong", "", "Automod");
+  automodTitle.id = "automod-settings-title";
+  automodCopy.append(
+    automodTitle,
+    textElement("p", "", "Keep your server calm with per-server moderation rules. Moderators and administrators are always ignored."),
+    textElement("p", "automod-permission-hint", "BirdBot needs Manage Messages to remove content and Moderate Members for warnings or timeouts."),
+  );
+  const automodStatus = textElement("span", "automod-status", automod.enabled ? "Enabled" : "Disabled");
+  automodStatus.classList.toggle("is-enabled", Boolean(automod.enabled));
+  automodHeader.append(automodCopy, automodStatus);
+  const automodForm = document.createElement("form");
+  automodForm.className = "automod-form";
+  automodForm.noValidate = true;
+  const automodStep = (number, title, description) => {
+    const section = document.createElement("section");
+    section.className = "automod-step";
+    const header = document.createElement("div");
+    header.className = "automod-step-header";
+    header.append(
+      textElement("span", "automod-step-number", String(number).padStart(2, "0")),
+      textElement("strong", "", title),
+    );
+    const copy = textElement("p", "automod-step-description", description);
+    const content = document.createElement("div");
+    content.className = "automod-step-content";
+    section.append(header, copy, content);
+    return { section, content };
+  };
+  const masterLabel = document.createElement("label");
+  masterLabel.className = "automod-master-toggle";
+  const masterInput = document.createElement("input");
+  masterInput.type = "checkbox";
+  masterInput.checked = Boolean(automod.enabled);
+  masterLabel.append(masterInput, textElement("span", "", "Enable Automod"));
+  const featureGrid = document.createElement("div");
+  featureGrid.className = "automod-feature-grid";
+  const featureInputs = {};
+  const featureOptions = {};
+  const featureStatuses = {};
+  const featureDefinitions = [
+    ["anti_link", "Anti-link", "Remove messages containing external links."],
+    ["anti_spam", "Anti-spam", "Detect repeated messages in a short window."],
+    ["banned_words", "Banned words filter", "Remove messages matching your word list."],
+    ["raid_protection", "Raid protection", "Detect a burst of new member joins."],
+    ["auto_warning", "Auto-warning", "Issue a numbered warning for a violation."],
+    ["auto_timeout", "Auto-timeout", "Timeout a violating member automatically."],
+  ];
+  featureDefinitions.forEach(([key, label, description]) => {
+    const option = document.createElement("label");
+    option.className = "automod-feature-option";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = Boolean(automod[key]);
+    featureInputs[key] = input;
+    featureOptions[key] = option;
+    const copy = document.createElement("span");
+    copy.className = "automod-feature-copy";
+    const status = textElement("small", "automod-feature-status", input.checked ? "On" : "Off");
+    featureStatuses[key] = status;
+    copy.append(textElement("strong", "", label), textElement("small", "", description), status);
+    option.append(input, copy);
+    featureGrid.append(option);
+  });
+  const wordsInput = document.createElement("textarea");
+  wordsInput.className = "automod-words-input";
+  wordsInput.rows = 3;
+  wordsInput.maxLength = 6_500;
+  wordsInput.placeholder = "One word or phrase per line";
+  wordsInput.value = Array.isArray(automod.banned_words_list) ? automod.banned_words_list.join("\n") : "";
+  const automodOptions = document.createElement("div");
+  automodOptions.className = "automod-options-grid";
+  const numberInput = (value, min, max) => {
+    const input = document.createElement("input");
+    input.className = "channel-select automod-number-input";
+    input.type = "number";
+    input.min = String(min);
+    input.max = String(max);
+    input.step = "1";
+    input.value = String(value ?? min);
+    return input;
+  };
+  const spamLimitInput = numberInput(automod.spam_message_limit || 5, 3, 30);
+  const spamWindowInput = numberInput(automod.spam_window_seconds || 8, 3, 60);
+  const raidLimitInput = numberInput(automod.raid_join_limit || 8, 3, 50);
+  const raidWindowInput = numberInput(automod.raid_window_seconds || 10, 5, 120);
+  const timeoutMinutesInput = numberInput(automod.auto_timeout_minutes || 10, 1, 40_320);
+  const bannedWordsField = labeledControl("Words or phrases (one per line)", wordsInput);
+  bannedWordsField.classList.add("automod-setting-field", "automod-setting-banned-words");
+  const spamLimitField = labeledControl("Messages in window", spamLimitInput);
+  const spamWindowField = labeledControl("Window (seconds)", spamWindowInput);
+  const spamFields = document.createElement("div");
+  spamFields.className = "automod-rule-fields";
+  spamFields.append(spamLimitField, spamWindowField);
+  const spamGroup = document.createElement("div");
+  spamGroup.className = "automod-rule-group";
+  spamGroup.dataset.automodSetting = "anti_spam";
+  spamGroup.append(textElement("strong", "", "Anti-spam threshold"), spamFields);
+  const raidLimitField = labeledControl("Joins in window", raidLimitInput);
+  const raidWindowField = labeledControl("Window (seconds)", raidWindowInput);
+  const raidFields = document.createElement("div");
+  raidFields.className = "automod-rule-fields";
+  raidFields.append(raidLimitField, raidWindowField);
+  const raidGroup = document.createElement("div");
+  raidGroup.className = "automod-rule-group";
+  raidGroup.dataset.automodSetting = "raid_protection";
+  raidGroup.append(textElement("strong", "", "Raid protection threshold"), raidFields);
+  const timeoutField = labeledControl("Timeout length (minutes)", timeoutMinutesInput);
+  timeoutField.classList.add("automod-setting-field");
+  timeoutField.dataset.automodSetting = "auto_timeout";
+  automodOptions.append(
+    bannedWordsField,
+    spamGroup,
+    raidGroup,
+    timeoutField,
+  );
+  const automodActions = document.createElement("div");
+  automodActions.className = "automod-actions";
+  const automodSave = textElement("button", "primary-button", "Save Automod");
+  automodSave.type = "submit";
+  const automodFormStatus = textElement("span", "automod-form-status", "");
+  automodActions.append(automodSave, automodFormStatus);
+  const enableStep = automodStep(1, "Turn Automod on", "Enable the master switch before any protection rule can take effect.");
+  enableStep.content.append(masterLabel);
+  const rulesStep = automodStep(2, "Choose protections", "Turn on only what you need. Auto-warning and Auto-timeout are response actions used when another rule detects a violation.");
+  rulesStep.content.append(featureGrid);
+  const tuningStep = automodStep(3, "Fine-tune selected rules", "Optional thresholds are shown only after their related rule is enabled.");
+  const tuningEmpty = textElement("p", "automod-tuning-empty", "Enable Anti-spam, Banned words, Raid protection, or Auto-timeout above to see its settings here.");
+  tuningStep.content.append(automodOptions);
+  tuningStep.content.append(tuningEmpty);
+  const saveStep = automodStep(4, "Save and apply", "Changes are applied to this server immediately after saving. Existing messages are not scanned retroactively.");
+  saveStep.content.append(automodActions);
+  const syncAutomodEnabled = () => {
+    const active = masterInput.checked;
+    automodStatus.textContent = active ? "Enabled" : "Disabled";
+    automodStatus.classList.toggle("is-enabled", active);
+    Object.entries(featureInputs).forEach(([key, input]) => {
+      input.disabled = !active;
+      featureOptions[key].classList.toggle("is-selected", active && input.checked);
+      featureStatuses[key].textContent = !active ? "Paused" : (input.checked ? "On" : "Off");
+      featureStatuses[key].classList.toggle("is-on", active && input.checked);
+    });
+    automodOptions.querySelectorAll("input, textarea").forEach((input) => { input.disabled = !active; });
+    const settingVisibility = {
+      banned_words: Boolean(featureInputs.banned_words?.checked),
+      anti_spam: Boolean(featureInputs.anti_spam?.checked),
+      raid_protection: Boolean(featureInputs.raid_protection?.checked),
+      auto_timeout: Boolean(featureInputs.auto_timeout?.checked),
+    };
+    bannedWordsField.hidden = !active || !settingVisibility.banned_words;
+    automodOptions.querySelectorAll("[data-automod-setting]").forEach((element) => {
+      const key = element.dataset.automodSetting;
+      element.hidden = !active || !settingVisibility[key];
+    });
+    tuningEmpty.hidden = [...automodOptions.children].some((element) => !element.hidden);
+  };
+  masterInput.addEventListener("change", syncAutomodEnabled);
+  Object.values(featureInputs).forEach((input) => input.addEventListener("change", syncAutomodEnabled));
+  automodForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (automodSave.disabled) return;
+    automodSave.disabled = true;
+    automodFormStatus.textContent = "Saving...";
+    automodFormStatus.className = "automod-form-status is-loading";
+    try {
+      const result = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/control/bot-settings/automod`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: masterInput.checked,
+          anti_link: featureInputs.anti_link.checked,
+          anti_spam: featureInputs.anti_spam.checked,
+          banned_words: featureInputs.banned_words.checked,
+          raid_protection: featureInputs.raid_protection.checked,
+          auto_warning: featureInputs.auto_warning.checked,
+          auto_timeout: featureInputs.auto_timeout.checked,
+          banned_words_list: wordsInput.value.split(/\r?\n/),
+          spam_message_limit: spamLimitInput.value,
+          spam_window_seconds: spamWindowInput.value,
+          raid_join_limit: raidLimitInput.value,
+          raid_window_seconds: raidWindowInput.value,
+          auto_timeout_minutes: timeoutMinutesInput.value,
+        }),
+      });
+      managementData.automod = result.automod || managementData.automod;
+      automodFormStatus.textContent = "Saved and applied.";
+      automodFormStatus.className = "automod-form-status is-success";
+      commandFeedback.hidden = false;
+      commandFeedback.textContent = "Automod settings saved and applied to this server.";
+      syncAutomodEnabled();
+    } catch (error) {
+      automodFormStatus.textContent = errorMessage(error, "Automod settings could not be saved.");
+      automodFormStatus.className = "automod-form-status is-error";
+    } finally {
+      automodSave.disabled = false;
+    }
+  });
+  automodForm.append(enableStep.section, rulesStep.section, tuningStep.section, saveStep.section);
+  automodSection.append(automodHeader, automodForm);
+  syncAutomodEnabled();
   const form = document.createElement("form");
   form.className = "server-message-form auto-react-form";
   form.noValidate = true;
@@ -1302,7 +2183,7 @@ function renderBotSettingsPanel() {
       save.disabled = false;
     }
   });
-  panel.append(heading, form, rulesSection, back);
+  panel.append(heading, automodSection, form, rulesSection, back);
   commandGrid.append(panel);
   renderRules();
 }
@@ -1574,6 +2455,7 @@ function renderRolesPanel(editingRoleId = "") {
 }
 
 function setManagementTab(tab) {
+  if (tab !== "control") stopTempVCRefresh();
   if (tab !== "music" && window.BirdBotMusic?.unmount) window.BirdBotMusic.unmount();
   if (tab !== "games" && window.BirdBotGames?.unmount) window.BirdBotGames.unmount();
   const canConfigure = managementData?.guild?.can_configure !== false;
@@ -1673,7 +2555,7 @@ function setManagementTab(tab) {
     return;
   }
   managementTitle.textContent = "Commands";
-  managementDescription.textContent = "Set the prefix, shortcuts, and reply language for each command, then choose where dashboard actions should run.";
+  managementDescription.textContent = "Browse organized command cards for General, Moderation, and Music tools. Open a card to configure shortcuts, language, and run options.";
   renderCommands();
 }
 
@@ -1828,7 +2710,7 @@ function renderTicketList(tickets) {
     if (ticket.closed_at) addDetail("Closed", formatTicketDate(ticket.closed_at));
     if (ticket.transcript_url) {
       const transcript = document.createElement("a");
-      transcript.href = ticket.transcript_url;
+      transcript.href = transcriptLink(ticket.transcript_url);
       transcript.target = "_blank";
       transcript.rel = "noopener";
       transcript.className = "ticket-log-transcript";
@@ -2171,7 +3053,7 @@ function renderTicketLogs(logs, query = "") {
     if (log.details) row.append(textElement("p", "ticket-log-details", log.details));
     if (log.transcript_url) {
       const link = document.createElement("a");
-      link.href = log.transcript_url;
+      link.href = transcriptLink(log.transcript_url);
       link.target = "_blank";
       link.rel = "noopener";
       link.className = "ticket-log-transcript";
@@ -2285,11 +3167,26 @@ const guildLogCategories = [
   ["messages", "Message activity", "Messages sent, edited, or deleted in server channels."],
   ["server", "Server changes", "Server settings, channel, and role changes."],
   ["members", "Member activity", "Members joining, leaving, or changing roles/profile details."],
-  ["moderation", "Moderation actions", "Bans, kicks, warnings, warning removals, timeouts, and unbans."],
+  ["moderation", "Moderation actions", "Bans, kicks, warnings, warning removals, timeouts, mutes, unbans, and Automod actions."],
 ];
 
 function guildLogEventName(value) {
   return String(value || "event").replaceAll("_", " ").replace(/^./, (character) => character.toUpperCase());
+}
+
+function guildLogDetails(log) {
+  let details = String(log.details || "");
+  const replacements = [
+    [log.actor_id, log.actor_name, "user"],
+    [log.target_id, log.target_name, String(log.event_type || "").startsWith("role_") ? "role" : "user"],
+    [log.channel_id, log.channel_name, "channel"],
+  ];
+  replacements.forEach(([id, name, kind]) => {
+    if (!id || !name) return;
+    const mention = kind === "channel" ? `<#${id}>` : kind === "role" ? `<@&${id}>` : `<@${id}>`;
+    details = details.split(mention).join(kind === "channel" ? `#${name}` : `@${name}`);
+  });
+  return details;
 }
 
 function renderGuildLogs(logs, query = "") {
@@ -2413,7 +3310,7 @@ function renderGuildLogs(logs, query = "") {
     const meta = textElement("div", "ticket-log-meta", formatTicketDate(log.created_at));
     if (log.target_name) meta.textContent += ` · Target: ${log.target_id ? `@${log.target_name}` : log.target_name}`;
     row.append(header, meta);
-    if (log.details) row.append(textElement("p", "ticket-log-details guild-log-details", log.details));
+    if (log.details) row.append(textElement("p", "ticket-log-details guild-log-details", guildLogDetails(log)));
     table.append(row);
   });
   search.addEventListener("input", () => {
@@ -2477,9 +3374,15 @@ function renderCommands() {
   toolbar.className = "commands-settings-toolbar";
   const toolbarHeading = document.createElement("div");
   toolbarHeading.className = "commands-settings-heading";
+  const commandSummary = textElement("span", "command-settings-summary", "");
+  const updateCommandSummary = () => {
+    const enabledCount = Object.values(draft.commands).filter((setting) => setting.enabled).length;
+    commandSummary.textContent = `${enabledCount} of ${managementData.commands.length} commands enabled`;
+  };
   toolbarHeading.append(
     textElement("strong", "", "Prefix commands"),
     textElement("p", "command-settings-hint", "Configure how text commands work in this server. Shortcuts work with or without the prefix."),
+    commandSummary,
   );
   const toolbarControls = document.createElement("div");
   toolbarControls.className = "commands-settings-controls";
@@ -2540,21 +3443,88 @@ function renderCommands() {
   toolbarControls.append(prefixField, prefixToggleLabel, saveButton, saveStatus);
   toolbar.append(toolbarHeading, toolbarControls);
   commandGrid.append(toolbar);
+  updateCommandSummary();
 
+  let lastCommandCategory = "";
   managementData.commands.forEach((command) => {
+    const commandCategory = command.category || "General";
+    if (commandCategory !== lastCommandCategory) {
+      const groupHeading = document.createElement("div");
+      groupHeading.className = "command-group-heading";
+      const groupLine = document.createElement("span");
+      groupLine.className = "command-group-line";
+      const groupTitle = textElement("strong", "", `${commandCategory} commands`);
+      const groupCount = managementData.commands.filter((item) => (item.category || "General") === commandCategory).length;
+      groupHeading.append(groupLine, groupTitle, textElement("span", "command-group-count", `${groupCount} available`));
+      commandGrid.append(groupHeading);
+      lastCommandCategory = commandCategory;
+    }
     const setting = draft.commands[command.name];
+    const isMusicCommand = ["play", "q", "pause", "skip", "stop"].includes(command.name);
+    const needsMusicQuery = ["play", "q"].includes(command.name);
+    const hasRunTarget = isMusicCommand
+      ? Boolean((managementData.voice_channels || []).length)
+      : Boolean((managementData.channels || []).length);
     const commandInvocation = String(command.label || `/${command.name}`).replace(/^\/+/, "");
     const card = document.createElement("article");
-    card.className = `command-card${command.name === "ban" ? " ban-command-card" : ""}${setting.enabled ? "" : " command-card-disabled"}`;
+    const categoryClass = String(commandCategory).toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    card.className = `command-card command-card-${categoryClass}${command.name === "ban" ? " ban-command-card" : ""}${setting.enabled ? "" : " command-card-disabled"}`;
+    card.dataset.commandName = command.name;
+    card.dataset.commandCategory = commandCategory;
+    const cardHeader = document.createElement("div");
+    cardHeader.className = "command-card-header";
+    const cardIdentity = document.createElement("div");
+    cardIdentity.className = "command-card-identity";
+    const categoryBadge = textElement("span", "command-category", commandCategory);
+    const cardTitle = textElement("strong", "command-card-title", command.label || `/${command.name}`);
+    cardIdentity.append(categoryBadge, cardTitle);
+    const status = textElement("span", `command-status${setting.enabled ? "" : " is-disabled"}`, setting.enabled ? "Enabled" : "Disabled");
+    cardHeader.append(cardIdentity, status);
     const button = document.createElement("button");
     button.className = "command-button";
     button.type = "button";
     button.dataset.commandPreview = commandInvocation;
     button.textContent = `${draft.prefix}${commandInvocation}`;
+    const configId = `command-config-${command.name.replace(/[^a-z0-9]+/gi, "-")}`;
+    button.title = "Open command settings";
+    button.setAttribute("aria-label", `Open settings for ${command.label || `/${command.name}`}`);
+    button.setAttribute("aria-expanded", "false");
+    button.setAttribute("aria-controls", configId);
     const description = textElement("p", "command-description", command.description);
+    const commandDetails = document.createElement("div");
+    commandDetails.className = "command-details";
+    const usageRow = document.createElement("div");
+    usageRow.className = "command-detail-row command-usage-row";
+    usageRow.append(textElement("span", "command-detail-label", "Usage"), textElement("code", "command-usage-code", command.usage || `${command.label || `/${command.name}`}`));
+    commandDetails.append(usageRow);
+    if (command.details) {
+      const detailsRow = document.createElement("div");
+      detailsRow.className = "command-detail-row command-explanation-row";
+      detailsRow.append(textElement("span", "command-detail-label", "What it does"), textElement("span", "command-detail-copy", command.details));
+      commandDetails.append(detailsRow);
+    }
+    if (Array.isArray(command.options) && command.options.length) {
+      const optionsRow = document.createElement("div");
+      optionsRow.className = "command-detail-row command-options-row";
+      const optionsList = document.createElement("ul");
+      optionsList.className = "command-options";
+      command.options.forEach((option) => optionsList.append(textElement("li", "", option)));
+      optionsRow.append(textElement("span", "command-detail-label", "Options"), optionsList);
+      commandDetails.append(optionsRow);
+    }
+    if (command.requirements) {
+      const requirement = textElement("p", "command-requirement", command.requirements);
+      requirement.prepend(textElement("span", "command-requirement-label", "Requirement · "));
+      commandDetails.append(requirement);
+    }
     const config = document.createElement("div");
     config.className = "command-config";
+    config.id = configId;
     config.hidden = true;
+    const configHeader = document.createElement("div");
+    configHeader.className = "command-config-header";
+    configHeader.append(textElement("strong", "", "Command settings"), textElement("span", "", "Customize, then run a test from this panel."));
+    config.append(configHeader);
     const enabledLabel = document.createElement("label");
     enabledLabel.className = "command-inline-toggle command-setting-toggle";
     const enabledInput = document.createElement("input");
@@ -2563,7 +3533,10 @@ function renderCommands() {
     enabledInput.addEventListener("change", () => {
       setting.enabled = enabledInput.checked;
       card.classList.toggle("command-card-disabled", !setting.enabled);
-      runButton.disabled = !managementData.channels.length || !setting.enabled;
+      status.textContent = setting.enabled ? "Enabled" : "Disabled";
+      status.classList.toggle("is-disabled", !setting.enabled);
+      runButton.disabled = !hasRunTarget || !setting.enabled;
+      updateCommandSummary();
     });
     enabledLabel.append(enabledInput, textElement("span", "", "Enable this command"));
     const shortcutsField = document.createElement("div");
@@ -2617,9 +3590,21 @@ function renderCommands() {
     languageSelect.value = setting.language;
     languageSelect.addEventListener("change", () => { setting.language = languageSelect.value; });
     config.append(enabledLabel, labeledControl("Shortcuts (without the prefix)", shortcutsField), labeledControl("Reply language", languageSelect));
-    const select = createChannelSelect();
+    const select = isMusicCommand ? null : createChannelSelect();
+    let musicQuery = null;
+    if (needsMusicQuery) {
+      musicQuery = document.createElement("input");
+      musicQuery.className = "channel-select music-command-query";
+      musicQuery.type = "text";
+      musicQuery.maxLength = 500;
+      musicQuery.placeholder = "YouTube link or music name";
+      config.append(labeledControl("YouTube link or music name", musicQuery));
+    }
+    if (isMusicCommand) {
+      config.append(textElement("p", "command-description command-announcement", "Music uses the requesting member's current voice channel. Join the voice channel before running this command."));
+    }
     let memberSelect = null;
-    if (["profile", "kick", "ban", "warning", "show_warning", "timeout"].includes(command.name)) {
+    if (["profile", "kick", "ban", "warning", "show_warning", "timeout", "mute"].includes(command.name)) {
       const memberControl = createMemberSelect();
       memberSelect = memberControl.select;
       let searchTimer = null;
@@ -2643,7 +3628,7 @@ function renderCommands() {
     }
     let reason = null;
     let deleteDays = null;
-    if (["kick", "ban", "warning", "timeout"].includes(command.name)) {
+    if (["kick", "ban", "warning", "timeout", "mute"].includes(command.name)) {
       reason = document.createElement("input");
       reason.className = "channel-select";
       reason.maxLength = 512;
@@ -2655,7 +3640,9 @@ function renderCommands() {
           ? "Announcement: @user has been Banned from the server"
           : command.name === "warning"
             ? "The member will receive a numbered warning and a private notification when possible."
-            : "The member will be timed out for the selected duration.";
+          : command.name === "timeout"
+            ? "The member will be timed out for the selected duration."
+            : "The member will be server-muted in their current voice channel.";
       config.append(textElement("p", "command-description command-announcement", announcement));
     }
     let warningNumber = null;
@@ -2669,7 +3656,7 @@ function renderCommands() {
       config.append(labeledControl("Warning number", warningNumber));
     }
     let durationMinutes = null;
-    if (command.name === "timeout") {
+  if (command.name === "timeout") {
       durationMinutes = document.createElement("input");
       durationMinutes.className = "channel-select";
       durationMinutes.type = "number";
@@ -2705,11 +3692,15 @@ function renderCommands() {
     const runButton = document.createElement("button");
     runButton.className = "primary-button";
     runButton.type = "button";
-    runButton.disabled = !managementData.channels.length || !setting.enabled;
+    runButton.disabled = !hasRunTarget || !setting.enabled;
     if (command.name !== "server") runButton.dataset.commandRunLabel = commandInvocation;
     runButton.textContent = command.name === "server" ? "Send Server Info" : `Run ${draft.prefix}${commandInvocation}`;
-    button.addEventListener("click", () => { config.hidden = !config.hidden; });
+    button.addEventListener("click", () => {
+      config.hidden = !config.hidden;
+      button.setAttribute("aria-expanded", String(!config.hidden));
+    });
     runButton.addEventListener("click", () => runWebsiteCommand(command.name, select, runButton, {
+      query: musicQuery?.value,
       member_id: memberSelect?.value,
       reason: reason?.value,
       warning_id: warningNumber?.value,
@@ -2717,7 +3708,8 @@ function renderCommands() {
       amount: deleteAmount ? Number(deleteAmount.value) : undefined,
       delete_message_days: deleteDays ? Number(deleteDays.value) : 0,
     }));
-    config.append(labeledControl("Target text channel", select), runButton);
+    if (select) config.append(labeledControl("Target text channel", select));
+    config.append(runButton);
     if (command.name === "ban" && managementData.bans.length) {
       const bans = document.createElement("div");
       bans.className = "ban-list";
@@ -2751,8 +3743,16 @@ function renderCommands() {
       bans.append(listHeader, textElement("p", "empty-state", "No active bans in this server."));
       config.append(bans);
     }
-    if (!managementData.channels.length) config.append(textElement("p", "form-error", "BirdBot cannot access any text channels in this server."));
-    card.append(button, description, config);
+    if (!hasRunTarget) {
+      config.append(textElement(
+        "p",
+        "form-error",
+        isMusicCommand
+          ? "BirdBot cannot access any voice channels in this server."
+          : "BirdBot cannot access any text channels in this server.",
+      ));
+    }
+    card.append(cardHeader, button, description, commandDetails, config);
     commandGrid.append(card);
   });
 }
@@ -2920,6 +3920,7 @@ async function searchMembers(query, select) {
 const delay = waitFor;
 
 async function runWebsiteCommand(commandName, select, button, payload = {}) {
+  const musicCommand = ["play", "q", "pause", "skip", "stop"].includes(commandName);
   if (button.disabled) return;
   const commandSettings = managementData.command_settings?.commands?.[commandName];
   if (commandSettings && commandSettings.enabled === false) {
@@ -2928,12 +3929,12 @@ async function runWebsiteCommand(commandName, select, button, payload = {}) {
     return;
   }
   const commandPrefix = managementData.command_settings?.prefix || "!";
-  if (!select.value) {
+  if (!musicCommand && !select?.value) {
     commandFeedback.hidden = false;
     commandFeedback.textContent = "Choose a text channel first.";
     return;
   }
-  if (["profile", "kick", "ban", "warning", "show_warning", "timeout"].includes(commandName) && !payload.member_id) {
+  if (["profile", "kick", "ban", "warning", "show_warning", "timeout", "mute"].includes(commandName) && !payload.member_id) {
     commandFeedback.hidden = false;
     commandFeedback.textContent = "Choose a target member first.";
     return;
@@ -2943,13 +3944,17 @@ async function runWebsiteCommand(commandName, select, button, payload = {}) {
   const commandLabel = commandName === "show_warning" ? "show warning" : commandName;
   beginLoading(`Sending ${commandPrefix}${commandLabel} to BirdBot...`);
   try {
+    const requestPayload = { ...payload };
+    if (!musicCommand && select?.value) requestPayload.channel_id = select.value;
     const queued = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/commands/${commandName}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channel_id: select.value, ...payload }),
+      body: JSON.stringify(requestPayload),
     });
     commandFeedback.hidden = false;
-    commandFeedback.textContent = `${commandPrefix}${commandLabel} is being sent to the selected channel...`;
+    commandFeedback.textContent = musicCommand
+      ? `${commandPrefix}${commandLabel} is being queued for your current voice channel...`
+      : `${commandPrefix}${commandLabel} is being sent to the selected channel...`;
     for (let attempt = 0; attempt < 30; attempt += 1) {
       // The bot worker checks its queue every two seconds; a shorter poll
       // interval makes completed commands feel immediate without waiting for
@@ -2957,7 +3962,17 @@ async function runWebsiteCommand(commandName, select, button, payload = {}) {
       await delay(700);
       const status = await requestJson(`/api/command-requests/${encodeURIComponent(queued.request_id)}`);
       if (status.status === "complete") {
-        const announcement = commandName === "kick"
+        const announcement = commandName === "play"
+          ? "Music request queued."
+          : commandName === "q"
+            ? "Track added to the music queue."
+            : commandName === "pause"
+              ? "Playback paused."
+              : commandName === "skip"
+                ? "Track skipped."
+                : commandName === "stop"
+                  ? "Music stopped and the queue was cleared."
+                  : commandName === "kick"
           ? "@user has been Kicked from the server"
           : commandName === "ban" ? "@user has been Banned from the server" : "";
         commandFeedback.textContent = announcement
@@ -2972,7 +3987,9 @@ async function runWebsiteCommand(commandName, select, button, payload = {}) {
       }
       if (status.status === "failed") throw new Error(status.error || "BirdBot could not run that command.");
     }
-    commandFeedback.textContent = `${commandPrefix}${commandLabel} is still queued. Check the selected channel shortly.`;
+    commandFeedback.textContent = musicCommand
+      ? `${commandPrefix}${commandLabel} is still queued. Check the voice channel shortly.`
+      : `${commandPrefix}${commandLabel} is still queued. Check the selected channel shortly.`;
   } catch (error) {
     commandFeedback.hidden = false;
     commandFeedback.textContent = errorMessage(error, "BirdBot could not run that command.");

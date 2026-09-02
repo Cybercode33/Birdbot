@@ -437,7 +437,7 @@
 
     function startFallbackPolling() {
       if (disposed || pollTimer != null) return;
-      // The bot publishes state four times per second; 1s fallback polling is
+      // The bot publishes state once per second; 1s fallback polling is
       // intentionally lighter while still keeping a page usable behind a
       // reverse proxy that blocks websocket upgrades.
       pollTimer = window.setInterval(refreshState, 1_000);

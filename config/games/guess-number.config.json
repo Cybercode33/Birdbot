@@ -1,0 +1,11 @@
+{
+  "id": "guess-number",
+  "name": "Guess the Number",
+  "theme": "#1f2937",
+  "minimumPlayers": 2,
+  "maximumPlayers": 20,
+  "numberMinimum": 1,
+  "numberMaximum": 100,
+  "enabled": true,
+  "language": "en"
+}
