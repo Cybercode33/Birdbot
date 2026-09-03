@@ -31,7 +31,9 @@ DASHBOARD_COMMAND_NAMES = (
     "unwarning",
     "show_warning",
     "timeout",
+    "untimeout",
     "mute",
+    "unmute",
     "lock",
     "unlock",
     "delete",
@@ -75,7 +77,9 @@ LOG_EVENT_CATEGORIES = {
     "moderation_warning": "moderation",
     "moderation_unwarning": "moderation",
     "moderation_timeout": "moderation",
+    "moderation_untimeout": "moderation",
     "moderation_mute": "moderation",
+    "moderation_unmute": "moderation",
     "moderation_automod": "moderation",
 }
 
@@ -325,6 +329,17 @@ class BirdBotStore:
                     raid_join_limit INTEGER NOT NULL DEFAULT 8,
                     raid_window_seconds INTEGER NOT NULL DEFAULT 10,
                     auto_timeout_minutes INTEGER NOT NULL DEFAULT 10,
+                    updated_by TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ai_configs (
+                    guild_id TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    channel_id TEXT,
                     updated_by TEXT,
                     updated_at TEXT NOT NULL
                 )
@@ -606,6 +621,7 @@ class BirdBotStore:
             connection.execute("CREATE INDEX IF NOT EXISTS idx_vc_presence_slot_enabled ON vc_presence_configs (slot, enabled, guild_id)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_command_requests_pending ON command_requests (status, created_at)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_guild_auto_reacts_channel ON guild_auto_reacts (guild_id, channel_id, enabled)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_ai_configs_enabled_channel ON ai_configs (enabled, channel_id)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_warnings_member ON warnings (guild_id, member_id, warning_id DESC)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_warnings_guild_active ON warnings (guild_id, removed_at, warning_id DESC)")
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(oauth_sessions)")}
@@ -2565,6 +2581,67 @@ class BirdBotStore:
             for row in rows
         ]
         return self._cache_set(key, result, ttl=5.0)  # type: ignore[return-value]
+
+    @staticmethod
+    def _default_ai_config(guild_id: str) -> dict[str, object]:
+        return {
+            "guild_id": str(guild_id),
+            "enabled": False,
+            "channel_id": None,
+            "updated_by": None,
+            "updated_at": None,
+        }
+
+    def ai_config(self, guild_id: str) -> dict[str, object]:
+        """Return the per-server AI assistant setting with safe defaults."""
+        guild_id = str(guild_id)
+        key = f"ai_config:{guild_id}"
+        cached = self._cache_get(key)
+        if cached is not self._CACHE_MISS:
+            return dict(cached)  # type: ignore[arg-type]
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT guild_id, enabled, channel_id, updated_by, updated_at "
+                "FROM ai_configs WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+        if row is None:
+            return self._cache_set(key, self._default_ai_config(guild_id), ttl=5.0)  # type: ignore[return-value]
+        result = {
+            "guild_id": guild_id,
+            "enabled": bool(row["enabled"]),
+            "channel_id": str(row["channel_id"]) if row["channel_id"] else None,
+            "updated_by": row["updated_by"],
+            "updated_at": row["updated_at"],
+        }
+        return self._cache_set(key, result, ttl=5.0)  # type: ignore[return-value]
+
+    def save_ai_config(
+        self,
+        guild_id: str,
+        *,
+        enabled: bool,
+        channel_id: str | None,
+        updated_by: str | None = None,
+    ) -> dict[str, object]:
+        """Persist one server's AI toggle and response channel."""
+        guild_id = str(guild_id)
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO ai_configs (guild_id, enabled, channel_id, updated_by, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET "
+                "enabled=excluded.enabled, channel_id=excluded.channel_id, "
+                "updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+                (
+                    guild_id,
+                    int(bool(enabled)),
+                    str(channel_id) if channel_id else None,
+                    str(updated_by) if updated_by else None,
+                    utc_now(),
+                ),
+            )
+        self._invalidate_cache()
+        return self.ai_config(guild_id)
 
     @staticmethod
     def _default_automod_config(guild_id: str) -> dict[str, object]:

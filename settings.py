@@ -18,6 +18,22 @@ DISCORD_OWNER_ID = os.getenv("DISCORD_OWNER_ID")
 SESSION_SECRET = os.getenv("SESSION_SECRET")
 DATA_PATH = Path(os.getenv("BIRDBOT_DATA_PATH") or (BASE_DIR / "data" / "birdbot.sqlite3"))
 SUPPORT_URL = os.getenv("SUPPORT_URL")
+
+# Optional Groq provider for the per-server AI assistant.  The key stays in
+# the host's private environment variables; the dashboard only receives a
+# boolean indicating whether the provider is configured.
+GROQ_API_KEY = (os.getenv("GROQ_API_KEY") or "").strip()
+GROQ_MODEL = (os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
+GROQ_FALLBACK_MODEL = (os.getenv("GROQ_FALLBACK_MODEL") or "openai/gpt-oss-20b").strip() or "openai/gpt-oss-20b"
+try:
+    GROQ_MAX_COMPLETION_TOKENS = max(128, min(4_096, int(os.getenv("GROQ_MAX_COMPLETION_TOKENS", "768"))))
+except (TypeError, ValueError):
+    GROQ_MAX_COMPLETION_TOKENS = 768
+try:
+    GROQ_TEMPERATURE = max(0.0, min(2.0, float(os.getenv("GROQ_TEMPERATURE", "0.7"))))
+except (TypeError, ValueError):
+    GROQ_TEMPERATURE = 0.7
+
 # Render exposes RENDER_EXTERNAL_URL automatically for web services. Use it as
 # the hosted default so a separate .env file is not required on Render; an
 # explicit DASHBOARD_PUBLIC_URL still wins for a custom domain.

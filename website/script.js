@@ -11,6 +11,13 @@ const serverList = document.getElementById("server-list");
 const selectorModal = document.getElementById("selector-modal");
 const confirmModal = document.getElementById("confirm-modal");
 const membersModal = document.getElementById("members-modal");
+const actionModal = document.getElementById("action-modal");
+const actionModalTitle = document.getElementById("action-modal-title");
+const actionModalCopy = document.getElementById("action-modal-copy");
+const actionModalFields = document.getElementById("action-modal-fields");
+const actionModalError = document.getElementById("action-modal-error");
+const actionModalCancel = document.getElementById("action-modal-cancel");
+const actionModalConfirm = document.getElementById("action-modal-confirm");
 const membersModalContent = document.getElementById("members-modal-content");
 const membersModalTitle = document.getElementById("members-title");
 const membersModalCopy = document.getElementById("members-copy");
@@ -55,6 +62,7 @@ let ticketPageMode = "config";
 let activeManagementTab = "commands";
 let musicPortalMode = false;
 let musicInitialOverview = null;
+let actionModalResolver = null;
 let ticketCountdownTimer = null;
 let ticketRefreshInFlight = false;
 let ticketLogsRefreshInFlight = false;
@@ -237,11 +245,106 @@ async function loadMusicGuildChoice() {
   }
 }
 
+function resolveActionModal(result = null) {
+  const resolver = actionModalResolver;
+  actionModalResolver = null;
+  if (actionModal) actionModal.hidden = true;
+  if (resolver) resolver(result);
+}
+
 function closeModals() {
   selectorModal.hidden = true;
   confirmModal.hidden = true;
   if (membersModal) membersModal.hidden = true;
+  resolveActionModal(null);
   activationError.textContent = "";
+}
+
+function bindDurationPicker(amountInput, unitSelect) {
+  if (!amountInput || !unitSelect) return;
+  const maximums = { m: 40320, h: 672, d: 28, w: 4 };
+  const sync = () => {
+    const maximum = maximums[unitSelect.value] || maximums.m;
+    amountInput.max = String(maximum);
+    amountInput.title = `Maximum ${maximum} ${unitSelect.value === "m" ? "minutes" : unitSelect.value === "h" ? "hours" : unitSelect.value === "d" ? "days" : "weeks"}`;
+    if (Number(amountInput.value) > maximum) amountInput.value = String(maximum);
+  };
+  unitSelect.addEventListener("change", sync);
+  sync();
+}
+
+function openActionModal({ title, copy, confirmLabel = "Continue", danger = false, includeDuration = false, includeReason = true } = {}) {
+  if (!actionModal || !actionModalTitle || !actionModalCopy || !actionModalFields || !actionModalConfirm) return Promise.resolve(null);
+  actionModalTitle.textContent = title || "Confirm action";
+  actionModalCopy.textContent = copy || "Please review this action before continuing.";
+  actionModalFields.replaceChildren();
+  actionModalError.textContent = "";
+  let durationInput = null;
+  let durationUnit = null;
+  let reasonInput = null;
+  if (includeDuration) {
+    const field = document.createElement("label");
+    field.className = "action-modal-field";
+    field.append(textElement("span", "action-modal-label", "Timeout duration"));
+    const durationPicker = document.createElement("div");
+    durationPicker.className = "action-modal-duration";
+    durationInput = document.createElement("input");
+    durationInput.type = "number";
+    durationInput.min = "1";
+    durationInput.max = "40320";
+    durationInput.step = "1";
+    durationInput.value = "10";
+    durationInput.className = "action-modal-input";
+    durationInput.dataset.actionDuration = "true";
+    durationInput.setAttribute("aria-label", "Timeout duration amount");
+    durationUnit = document.createElement("select");
+    durationUnit.className = "action-modal-input action-modal-duration-unit";
+    durationUnit.dataset.actionDurationUnit = "true";
+    durationUnit.append(new Option("Minutes", "m"), new Option("Hours", "h"), new Option("Days", "d"), new Option("Weeks", "w"));
+    durationUnit.setAttribute("aria-label", "Timeout duration unit");
+    bindDurationPicker(durationInput, durationUnit);
+    durationPicker.append(durationInput, durationUnit);
+    field.append(durationPicker, textElement("small", "action-modal-hint", "Maximum 28 days. Choose minutes, hours, days, or weeks."));
+    actionModalFields.append(field);
+  }
+  if (includeReason) {
+    const field = document.createElement("label");
+    field.className = "action-modal-field";
+    field.append(textElement("span", "action-modal-label", "Reason (optional)"));
+    reasonInput = document.createElement("textarea");
+    reasonInput.className = "action-modal-input action-modal-reason";
+    reasonInput.rows = 3;
+    reasonInput.maxLength = 512;
+    reasonInput.placeholder = "Add a short reason for the moderation log";
+    reasonInput.dataset.actionReason = "true";
+    field.append(reasonInput);
+    actionModalFields.append(field);
+  }
+  actionModalConfirm.className = danger ? "danger-button" : "primary-button";
+  actionModalConfirm.textContent = confirmLabel;
+  actionModal.hidden = false;
+  const focusTarget = durationInput || reasonInput || actionModalConfirm;
+  window.requestAnimationFrame(() => focusTarget.focus());
+  return new Promise((resolve) => {
+    actionModalResolver = resolve;
+  });
+}
+
+function submitActionModal() {
+  if (!actionModal || actionModal.hidden) return;
+  const durationInput = actionModalFields?.querySelector("[data-action-duration]");
+  const durationUnit = actionModalFields?.querySelector("[data-action-duration-unit]");
+  const reasonInput = actionModalFields?.querySelector("[data-action-reason]");
+  const durationAmount = durationInput ? Number(durationInput.value) : null;
+  const durationMultipliers = { m: 1, h: 60, d: 1440, w: 10080 };
+  const selectedUnit = durationUnit?.value || "m";
+  const duration = durationInput ? durationAmount * (durationMultipliers[selectedUnit] || 1) : null;
+  if (durationInput && (!Number.isInteger(durationAmount) || durationAmount < 1 || !Number.isInteger(duration) || duration > 40320)) {
+    actionModalError.textContent = "Choose a valid timeout between 1 minute and 28 days.";
+    durationInput.focus();
+    return;
+  }
+  resolveActionModal({ duration, durationAmount, durationUnit: selectedUnit, reason: reasonInput ? reasonInput.value.trim().slice(0, 512) : "" });
 }
 
 function beginLoading(message, blocking = true) {
@@ -584,24 +687,37 @@ async function runMembersAction(action, member = null, bulk = false) {
   }
   const candidates = (bulk ? membersPanelRecords : [member]).filter((item) => item && !item.is_bot);
   if (!candidates.length) return;
-  const label = bulk ? action + " all eligible members" : action + " " + memberDisplayName(candidates[0]);
-  if (!window.confirm("Confirm " + label + "? Discord permissions and role hierarchy still apply.")) return;
+  const actionName = String(action || "action").charAt(0).toUpperCase() + String(action || "action").slice(1);
+  const label = bulk ? actionName + " all eligible members" : actionName + " " + memberDisplayName(candidates[0]);
+  const confirmation = await openActionModal({
+    title: bulk ? actionName + " all eligible members" : "Confirm " + actionName,
+    copy: "You are about to " + label.toLowerCase() + ". Discord permissions and role hierarchy still apply.",
+    confirmLabel: bulk ? "Queue actions" : actionName,
+    danger: action === "kick" || action === "ban",
+    includeDuration: action === "timeout",
+    includeReason: true,
+  });
+  if (!confirmation) return;
   let reason = "Dashboard member action";
   membersPanelActionDuration = 10;
+  membersPanelActionDurationAmount = 10;
+  membersPanelActionDurationUnit = "m";
   if (action === "timeout") {
-    const durationText = window.prompt("Timeout duration in minutes (1-40320):", "10");
-    if (durationText === null) return;
-    const duration = Number(durationText);
-    if (!Number.isInteger(duration) || duration < 1 || duration > 40320) {
-      actionFeedback.hidden = false;
-      actionFeedback.textContent = "Enter a timeout duration between 1 and 40,320 minutes.";
-      return;
-    }
-    membersPanelActionDuration = duration;
+    membersPanelActionDuration = confirmation.duration || 10;
+    membersPanelActionDurationAmount = confirmation.durationAmount || 10;
+    membersPanelActionDurationUnit = confirmation.durationUnit || "m";
   }
-  const reasonText = window.prompt("Reason (optional):", "");
-  if (reasonText !== null && reasonText.trim()) reason = reasonText.trim().slice(0, 512);
-  if (candidates.length > 500 && !window.confirm("This will queue the first 500 eligible members to avoid Discord rate limits. Continue?")) return;
+  if (confirmation.reason) reason = confirmation.reason;
+  if (candidates.length > 500) {
+    const limited = await openActionModal({
+      title: "Large action queue",
+      copy: "Only the first 500 eligible members will be queued to stay within Discord rate limits.",
+      confirmLabel: "Queue first 500",
+      danger: action === "kick" || action === "ban",
+      includeReason: false,
+    });
+    if (!limited) return;
+  }
   const targets = candidates.slice(0, 500);
   beginLoading("Queuing " + action + " action" + (bulk ? "s" : "") + "...");
   try {
@@ -611,7 +727,15 @@ async function runMembersAction(action, member = null, bulk = false) {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channel_id: channelId, member_id: target.member_id, reason, silent: true, duration_minutes: membersPanelActionDuration }),
+        body: JSON.stringify({
+          channel_id: channelId,
+          member_id: target.member_id,
+          reason,
+          silent: true,
+          duration_minutes: membersPanelActionDuration,
+          duration_amount: action === "timeout" ? membersPanelActionDurationAmount : undefined,
+          duration_unit: action === "timeout" ? membersPanelActionDurationUnit : undefined,
+        }),
       },
     )));
     if (bulk) {
@@ -641,6 +765,8 @@ async function runMembersAction(action, member = null, bulk = false) {
 
 let membersPanelContext = null;
 let membersPanelActionDuration = 10;
+let membersPanelActionDurationAmount = 10;
+let membersPanelActionDurationUnit = "m";
 
 async function showMembers(guild) {
   if (!guild?.id || !membersModal) return;
@@ -653,7 +779,9 @@ async function showMembers(guild) {
     membersPanelGuild = guild;
     membersPanelContext = management;
     membersPanelRecords = roster.members || [];
-    membersModalTitle.textContent = guild.name + " members";
+    // Keep the English section label separate from RTL server names so mixed
+    // Arabic/English titles remain readable in the members dialog.
+    membersModalTitle.textContent = "Members — " + guild.name;
     membersModalCopy.textContent = "Review member details or run a moderation action. Bot accounts are protected; Discord permissions and role hierarchy are enforced.";
     renderMembersPanel("");
     membersModal.hidden = false;
@@ -718,13 +846,14 @@ function renderControlPanel() {
   const automodEnabled = Boolean(managementData?.automod?.enabled);
   const automodFeatureCount = ["anti_link", "anti_spam", "banned_words", "raid_protection", "auto_warning", "auto_timeout"]
     .filter((key) => Boolean(managementData?.automod?.[key])).length;
+  const aiEnabled = Boolean(managementData?.ai?.enabled);
   const cards = [
     ["Server message", "Configure automated server announcements."],
     ["Roles", `${roles.toLocaleString()} roles available to manage.`],
     ["Channels", `${channels.toLocaleString()} channels available to manage.`],
     ["Temp VC", tempVCEnabled ? "Temporary voice rooms are enabled." : "Enable and manage temporary voice rooms."],
     ["DM's Messages", "Configure private messages sent by BirdBot."],
-    ["Bot Settings", `${automodEnabled ? `${automodFeatureCount} Automod rule${automodFeatureCount === 1 ? "" : "s"} enabled` : "Automod disabled"} · ${autoReactRules.toLocaleString()} auto-react rule${autoReactRules === 1 ? "" : "s"} configured.`],
+    ["Bot Settings", `${automodEnabled ? `${automodFeatureCount} Automod rule${automodFeatureCount === 1 ? "" : "s"} enabled` : "Automod disabled"} · ${autoReactRules.toLocaleString()} auto-react rule${autoReactRules === 1 ? "" : "s"} · AI ${aiEnabled ? "enabled" : "disabled"}.`],
     ["Bot profile", "Customize BirdBot's profile and presence."],
     ["VC", vcPremium ? "Premium feature · place secure, host-configured bots in voice channels." : "Premium feature · unlock voice presence controls."],
   ];
@@ -823,7 +952,7 @@ async function refreshTempVCPanel() {
 
 function startTempVCRefresh() {
   stopTempVCRefresh();
-  tempVCRefreshTimer = window.setInterval(() => { void refreshTempVCPanel(); }, 2_000);
+  tempVCRefreshTimer = window.setInterval(() => { void refreshTempVCPanel(); }, 4_000);
 }
 
 function renderTempVCPanel() {
@@ -1821,7 +1950,7 @@ function renderBotSettingsPanel() {
   heading.className = "server-message-heading";
   heading.append(
     textElement("h3", "server-message-title", "Bot Settings"),
-    textElement("p", "server-message-copy", "Configure Automod and automatic reactions. Settings apply only to this server."),
+    textElement("p", "server-message-copy", "Configure Automod, automatic reactions, and the AI assistant. Settings apply only to this server."),
   );
   const automod = managementData.automod || {};
   const automodSection = document.createElement("section");
@@ -1916,7 +2045,16 @@ function renderBotSettingsPanel() {
   const spamWindowInput = numberInput(automod.spam_window_seconds || 8, 3, 60);
   const raidLimitInput = numberInput(automod.raid_join_limit || 8, 3, 50);
   const raidWindowInput = numberInput(automod.raid_window_seconds || 10, 5, 120);
-  const timeoutMinutesInput = numberInput(automod.auto_timeout_minutes || 10, 1, 40_320);
+  const storedTimeoutMinutes = Number(automod.auto_timeout_minutes || 10);
+  const storedTimeoutUnit = storedTimeoutMinutes % 10080 === 0 ? "w" : storedTimeoutMinutes % 1440 === 0 ? "d" : storedTimeoutMinutes % 60 === 0 ? "h" : "m";
+  const storedTimeoutAmount = storedTimeoutMinutes / ({ w: 10080, d: 1440, h: 60, m: 1 }[storedTimeoutUnit] || 1);
+  const timeoutAmountInput = numberInput(storedTimeoutAmount, 1, 40_320);
+  timeoutAmountInput.classList.add("automod-timeout-amount");
+  const timeoutUnitSelect = document.createElement("select");
+  timeoutUnitSelect.className = "channel-select automod-timeout-unit";
+  timeoutUnitSelect.append(new Option("Minutes", "m"), new Option("Hours", "h"), new Option("Days", "d"), new Option("Weeks", "w"));
+  timeoutUnitSelect.value = storedTimeoutUnit;
+  bindDurationPicker(timeoutAmountInput, timeoutUnitSelect);
   const bannedWordsField = labeledControl("Words or phrases (one per line)", wordsInput);
   bannedWordsField.classList.add("automod-setting-field", "automod-setting-banned-words");
   const spamLimitField = labeledControl("Messages in window", spamLimitInput);
@@ -1937,9 +2075,13 @@ function renderBotSettingsPanel() {
   raidGroup.className = "automod-rule-group";
   raidGroup.dataset.automodSetting = "raid_protection";
   raidGroup.append(textElement("strong", "", "Raid protection threshold"), raidFields);
-  const timeoutField = labeledControl("Timeout length (minutes)", timeoutMinutesInput);
+  const timeoutPicker = document.createElement("div");
+  timeoutPicker.className = "command-duration-picker";
+  timeoutPicker.append(timeoutAmountInput, timeoutUnitSelect);
+  const timeoutField = labeledControl("Auto-timeout length", timeoutPicker);
   timeoutField.classList.add("automod-setting-field");
   timeoutField.dataset.automodSetting = "auto_timeout";
+  timeoutField.append(textElement("small", "command-field-hint", "Choose minutes, hours, days, or weeks. Maximum 28 days."));
   automodOptions.append(
     bannedWordsField,
     spamGroup,
@@ -1972,7 +2114,7 @@ function renderBotSettingsPanel() {
       featureStatuses[key].textContent = !active ? "Paused" : (input.checked ? "On" : "Off");
       featureStatuses[key].classList.toggle("is-on", active && input.checked);
     });
-    automodOptions.querySelectorAll("input, textarea").forEach((input) => { input.disabled = !active; });
+    automodOptions.querySelectorAll("input, textarea, select").forEach((input) => { input.disabled = !active; });
     const settingVisibility = {
       banned_words: Boolean(featureInputs.banned_words?.checked),
       anti_spam: Boolean(featureInputs.anti_spam?.checked),
@@ -2011,7 +2153,8 @@ function renderBotSettingsPanel() {
           spam_window_seconds: spamWindowInput.value,
           raid_join_limit: raidLimitInput.value,
           raid_window_seconds: raidWindowInput.value,
-          auto_timeout_minutes: timeoutMinutesInput.value,
+          auto_timeout_amount: timeoutAmountInput.value,
+          auto_timeout_unit: timeoutUnitSelect.value,
         }),
       });
       managementData.automod = result.automod || managementData.automod;
@@ -2030,6 +2173,111 @@ function renderBotSettingsPanel() {
   automodForm.append(enableStep.section, rulesStep.section, tuningStep.section, saveStep.section);
   automodSection.append(automodHeader, automodForm);
   syncAutomodEnabled();
+  const ai = managementData.ai || {};
+  const aiAvailable = managementData.ai_available !== false;
+  const aiSection = document.createElement("section");
+  aiSection.className = "automod-settings-card ai-settings-card";
+  aiSection.setAttribute("aria-labelledby", "ai-settings-title");
+  const aiHeader = document.createElement("div");
+  aiHeader.className = "automod-settings-header";
+  const aiCopy = document.createElement("div");
+  aiCopy.className = "automod-settings-copy";
+  const aiTitle = textElement("strong", "", "AI assistant");
+  aiTitle.id = "ai-settings-title";
+  aiCopy.append(
+    aiTitle,
+    textElement("p", "", "When enabled, BirdBot replies to every human message in one selected text channel."),
+    textElement("p", "automod-permission-hint", aiAvailable
+      ? "Groq is ready. The provider key stays on the host and is never sent to the browser."
+      : "Provider unavailable. Add GROQ_API_KEY as a private host secret, install the groq package, and restart BirdBot."),
+  );
+  const aiStatus = textElement("span", "automod-status", ai.enabled ? "Enabled" : "Disabled");
+  aiStatus.classList.toggle("is-enabled", Boolean(ai.enabled));
+  aiHeader.append(aiCopy, aiStatus);
+  const aiForm = document.createElement("form");
+  aiForm.className = "automod-form ai-settings-form";
+  aiForm.noValidate = true;
+  const aiStep = (number, title, description) => {
+    const section = document.createElement("section");
+    section.className = "automod-step";
+    const stepHeader = document.createElement("div");
+    stepHeader.className = "automod-step-header";
+    stepHeader.append(
+      textElement("span", "automod-step-number", String(number).padStart(2, "0")),
+      textElement("strong", "", title),
+    );
+    const copy = textElement("p", "automod-step-description", description);
+    const content = document.createElement("div");
+    content.className = "automod-step-content";
+    section.append(stepHeader, copy, content);
+    return { section, content };
+  };
+  const aiEnabledLabel = document.createElement("label");
+  aiEnabledLabel.className = "automod-master-toggle";
+  const aiEnabledInput = document.createElement("input");
+  aiEnabledInput.type = "checkbox";
+  aiEnabledInput.checked = Boolean(ai.enabled);
+  aiEnabledLabel.append(aiEnabledInput, textElement("span", "", "Enable AI assistant"));
+  const aiChannelSelect = createChannelSelect();
+  aiChannelSelect.value = String(ai.channel_id || "");
+  const aiChannelField = labeledControl("AI response channel", aiChannelSelect);
+  const aiHint = textElement("p", "automod-tuning-empty", "Every non-bot message in this channel receives a reply. Choose a channel where members expect the assistant.");
+  const aiSave = textElement("button", "primary-button", "Save AI settings");
+  aiSave.type = "submit";
+  const aiFormStatus = textElement("span", "automod-form-status", "");
+  const aiActions = document.createElement("div");
+  aiActions.className = "automod-actions";
+  aiActions.append(aiSave, aiFormStatus);
+  const aiEnableStep = aiStep(1, "Turn the assistant on", "Enable the switch before BirdBot responds in Discord.");
+  aiEnableStep.content.append(aiEnabledLabel);
+  const aiChannelStep = aiStep(2, "Choose one channel", "Select where the assistant should listen and reply. Messages in other channels are ignored.");
+  aiChannelStep.content.append(aiChannelField, aiHint);
+  const aiSaveStep = aiStep(3, "Save and apply", "The setting applies to this server immediately after saving.");
+  aiSaveStep.content.append(aiActions);
+  const syncAi = () => {
+    const enabled = aiEnabledInput.checked;
+    aiStatus.textContent = enabled ? "Enabled" : "Disabled";
+    aiStatus.classList.toggle("is-enabled", enabled);
+    aiChannelSelect.disabled = !enabled;
+  };
+  aiEnabledInput.addEventListener("change", syncAi);
+  aiForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (aiSave.disabled) return;
+    if (aiEnabledInput.checked && !aiChannelSelect.value) {
+      aiFormStatus.textContent = "Choose a response channel first.";
+      aiFormStatus.className = "automod-form-status is-error";
+      aiChannelSelect.focus();
+      return;
+    }
+    aiSave.disabled = true;
+    aiFormStatus.textContent = "Saving...";
+    aiFormStatus.className = "automod-form-status is-loading";
+    try {
+      const result = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/control/bot-settings/ai`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: aiEnabledInput.checked, channel_id: aiChannelSelect.value || null }),
+      });
+      managementData.ai = result.ai || managementData.ai;
+      if (typeof result.available === "boolean") managementData.ai_available = result.available;
+      aiFormStatus.textContent = result.available === false ? "Saved, but the provider key is missing." : "Saved and applied.";
+      aiFormStatus.className = result.available === false ? "automod-form-status is-error" : "automod-form-status is-success";
+      commandFeedback.hidden = false;
+      commandFeedback.textContent = result.available === false
+        ? "AI settings saved. Add GROQ_API_KEY to the host before enabling replies."
+        : "AI assistant settings saved and applied to this server.";
+      syncAi();
+    } catch (error) {
+      aiFormStatus.textContent = errorMessage(error, "AI settings could not be saved.");
+      aiFormStatus.className = "automod-form-status is-error";
+    } finally {
+      aiSave.disabled = false;
+    }
+  });
+  aiForm.append(aiEnableStep.section, aiChannelStep.section, aiSaveStep.section);
+  aiSection.append(aiHeader, aiForm);
+  syncAi();
   const form = document.createElement("form");
   form.className = "server-message-form auto-react-form";
   form.noValidate = true;
@@ -2183,7 +2431,7 @@ function renderBotSettingsPanel() {
       save.disabled = false;
     }
   });
-  panel.append(heading, automodSection, form, rulesSection, back);
+  panel.append(heading, automodSection, aiSection, form, rulesSection, back);
   commandGrid.append(panel);
   renderRules();
 }
@@ -3167,7 +3415,7 @@ const guildLogCategories = [
   ["messages", "Message activity", "Messages sent, edited, or deleted in server channels."],
   ["server", "Server changes", "Server settings, channel, and role changes."],
   ["members", "Member activity", "Members joining, leaving, or changing roles/profile details."],
-  ["moderation", "Moderation actions", "Bans, kicks, warnings, warning removals, timeouts, mutes, unbans, and Automod actions."],
+  ["moderation", "Moderation actions", "Bans, kicks, warnings, warning removals, timeouts, timeout removals, mutes, un-mutes, unbans, and Automod actions."],
 ];
 
 function guildLogEventName(value) {
@@ -3604,7 +3852,7 @@ function renderCommands() {
       config.append(textElement("p", "command-description command-announcement", "Music uses the requesting member's current voice channel. Join the voice channel before running this command."));
     }
     let memberSelect = null;
-    if (["profile", "kick", "ban", "warning", "show_warning", "timeout", "mute"].includes(command.name)) {
+    if (["profile", "kick", "ban", "warning", "show_warning", "timeout", "untimeout", "mute", "unmute"].includes(command.name)) {
       const memberControl = createMemberSelect();
       memberSelect = memberControl.select;
       let searchTimer = null;
@@ -3628,7 +3876,7 @@ function renderCommands() {
     }
     let reason = null;
     let deleteDays = null;
-    if (["kick", "ban", "warning", "timeout", "mute"].includes(command.name)) {
+    if (["kick", "ban", "warning", "timeout", "untimeout", "mute", "unmute"].includes(command.name)) {
       reason = document.createElement("input");
       reason.className = "channel-select";
       reason.maxLength = 512;
@@ -3642,7 +3890,11 @@ function renderCommands() {
             ? "The member will receive a numbered warning and a private notification when possible."
           : command.name === "timeout"
             ? "The member will be timed out for the selected duration."
-            : "The member will be server-muted in their current voice channel.";
+            : command.name === "untimeout"
+              ? "The member's active timeout will be removed."
+              : command.name === "mute"
+                ? "The member will be server-muted in their current voice channel."
+                : "The member's server voice mute will be removed.";
       config.append(textElement("p", "command-description command-announcement", announcement));
     }
     let warningNumber = null;
@@ -3655,17 +3907,26 @@ function renderCommands() {
       warningNumber.placeholder = "Warning number, for example 12";
       config.append(labeledControl("Warning number", warningNumber));
     }
-    let durationMinutes = null;
-  if (command.name === "timeout") {
-      durationMinutes = document.createElement("input");
-      durationMinutes.className = "channel-select";
-      durationMinutes.type = "number";
-      durationMinutes.min = "1";
-      durationMinutes.max = "40320";
-      durationMinutes.step = "1";
-      durationMinutes.value = "10";
-      durationMinutes.placeholder = "Minutes (1-40320)";
-      config.append(labeledControl("Timeout duration (minutes)", durationMinutes));
+    let durationAmount = null;
+    let durationUnit = null;
+    if (command.name === "timeout") {
+      durationAmount = document.createElement("input");
+      durationAmount.className = "channel-select timeout-duration-amount";
+      durationAmount.type = "number";
+      durationAmount.min = "1";
+      durationAmount.step = "1";
+      durationAmount.value = "10";
+      durationAmount.placeholder = "Amount";
+      durationUnit = document.createElement("select");
+      durationUnit.className = "channel-select timeout-duration-unit";
+      durationUnit.append(new Option("Minutes", "m"), new Option("Hours", "h"), new Option("Days", "d"), new Option("Weeks", "w"));
+      bindDurationPicker(durationAmount, durationUnit);
+      const durationPicker = document.createElement("div");
+      durationPicker.className = "command-duration-picker";
+      durationPicker.append(durationAmount, durationUnit);
+      const durationField = labeledControl("Timeout duration", durationPicker);
+      durationField.append(textElement("small", "command-field-hint", "Choose minutes, hours, days, or weeks. Maximum 28 days."));
+      config.append(durationField);
     }
     let deleteAmount = null;
     if (command.name === "delete") {
@@ -3704,7 +3965,8 @@ function renderCommands() {
       member_id: memberSelect?.value,
       reason: reason?.value,
       warning_id: warningNumber?.value,
-      duration_minutes: durationMinutes ? Number(durationMinutes.value) : undefined,
+      duration_amount: durationAmount ? Number(durationAmount.value) : undefined,
+      duration_unit: durationUnit ? durationUnit.value : undefined,
       amount: deleteAmount ? Number(deleteAmount.value) : undefined,
       delete_message_days: deleteDays ? Number(deleteDays.value) : 0,
     }));
@@ -3934,7 +4196,7 @@ async function runWebsiteCommand(commandName, select, button, payload = {}) {
     commandFeedback.textContent = "Choose a text channel first.";
     return;
   }
-  if (["profile", "kick", "ban", "warning", "show_warning", "timeout", "mute"].includes(commandName) && !payload.member_id) {
+  if (["profile", "kick", "ban", "warning", "show_warning", "timeout", "untimeout", "mute", "unmute"].includes(commandName) && !payload.member_id) {
     commandFeedback.hidden = false;
     commandFeedback.textContent = "Choose a target member first.";
     return;
@@ -4208,9 +4470,14 @@ async function initialize() {
 
 document.getElementById("open-selector").addEventListener("click", openSelector);
 confirmActivation.addEventListener("click", changeSelectedGuildState);
+if (actionModalConfirm) actionModalConfirm.addEventListener("click", submitActionModal);
+if (actionModalCancel) actionModalCancel.addEventListener("click", () => resolveActionModal(null));
+document.querySelectorAll("[data-close-action-modal]").forEach((button) => button.addEventListener("click", () => resolveActionModal(null)));
 document.querySelectorAll("[data-close-modal]").forEach((button) => button.addEventListener("click", closeModals));
 document.querySelectorAll(".modal").forEach((modal) => modal.addEventListener("click", (event) => {
-  if (event.target === modal) closeModals();
+  if (event.target !== modal) return;
+  if (modal === actionModal) resolveActionModal(null);
+  else closeModals();
 }));
 document.querySelectorAll("[data-management-tab]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -4253,11 +4520,15 @@ function refreshActiveTicketView() {
 // Discord-side claims and timeout deletions are reflected without requiring a
 // full page refresh.  The API's server_time keeps the local countdown aligned
 // even when the browser clock is skewed.
-window.setInterval(refreshActiveTicketView, 5_000);
+window.setInterval(refreshActiveTicketView, 8_000);
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) refreshActiveTicketView();
 });
-window.addEventListener("keydown", (event) => { if (event.key === "Escape") closeModals(); });
+window.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (actionModal && !actionModal.hidden) resolveActionModal(null);
+  else closeModals();
+});
 window.addEventListener("popstate", () => initialize());
 window.addEventListener("unhandledrejection", (event) => {
   event.preventDefault();

@@ -174,8 +174,8 @@
       details.append(element("strong", "music-track-name", track.name), element("span", "music-track-meta", `${track.artist}${track.album ? ` · ${track.album}` : ""}`));
       row.append(details);
       const actions = element("div", "music-track-actions");
-      const play = makeActionButton("Play", "play", { track_id: track.id }, "music-small-button", "play");
-      const queue = makeActionButton("Queue", "queue", { track_id: track.id }, "music-small-button music-queue-button", "next");
+      const play = makeActionButton("Play", "play", { track_id: track.id }, "music-small-button music-track-play-button", "play");
+      const queue = makeActionButton("Queue", "queue", { track_id: track.id }, "music-small-button music-queue-button music-track-queue-button", "next");
       play.dataset.queueTrackAction = "play";
       queue.dataset.queueTrackAction = "queue";
       play.dataset.trackId = row.dataset.trackId;
@@ -394,7 +394,7 @@
       // A connected websocket is authoritative and already carries the same
       // state published by the bot worker. Keep HTTP polling only as a
       // fallback for older deployments/proxies that do not support upgrades.
-      if (disposed || stateRequestBusy || (stateSocket && stateSocket.readyState === window.WebSocket.OPEN)) return;
+      if (disposed || document.hidden || stateRequestBusy || (stateSocket && stateSocket.readyState === window.WebSocket.OPEN)) return;
       stateRequestBusy = true;
       try {
         const response = await requestJson(`${base}/state`, { cache: "no-store" });
@@ -437,10 +437,10 @@
 
     function startFallbackPolling() {
       if (disposed || pollTimer != null) return;
-      // The bot publishes state once per second; 1s fallback polling is
-      // intentionally lighter while still keeping a page usable behind a
-      // reverse proxy that blocks websocket upgrades.
-      pollTimer = window.setInterval(refreshState, 1_000);
+      // WebSocket is the normal live path.  Use a slower fallback poll when a
+      // reverse proxy blocks upgrades so the player stays responsive without
+      // generating a request every second.
+      pollTimer = window.setInterval(refreshState, 2_000);
     }
 
     function connectStateSocket() {

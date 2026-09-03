@@ -19,6 +19,7 @@ from discord.ext import commands
 
 from command_messages import command_message
 from discord_members import resolve_guild_member
+from ai_assistant import AIAssistant
 from role_permissions import ROLE_PERMISSION_KEYS
 from settings import DASHBOARD_PUBLIC_URL
 from storage import LOG_EVENT_CATEGORIES, UNCLAIMED_TICKET_TIMEOUT_SECONDS, store
@@ -54,7 +55,9 @@ LOG_EVENT_LABELS = {
     "moderation_warning": "Warning issued",
     "moderation_unwarning": "Warning removed",
     "moderation_timeout": "Member timed out",
+    "moderation_untimeout": "Member timeout removed",
     "moderation_mute": "Member server-muted",
+    "moderation_unmute": "Member server mute removed",
     "moderation_automod": "Automod action",
 }
 LOG_EVENT_ACTIONS = {
@@ -83,12 +86,15 @@ LOG_EVENT_ACTIONS = {
     "moderation_warning": "warned",
     "moderation_unwarning": "removed a warning from",
     "moderation_timeout": "timed out",
+    "moderation_untimeout": "removed the timeout from",
     "moderation_mute": "server-muted",
+    "moderation_unmute": "removed the server mute from",
     "moderation_automod": "applied an Automod rule to",
 }
 _LOG_MODERATION_EVENTS = {
     "moderation_kick", "moderation_ban", "moderation_unban", "moderation_warning",
-    "moderation_unwarning", "moderation_timeout", "moderation_mute", "moderation_automod",
+    "moderation_unwarning", "moderation_timeout", "moderation_untimeout", "moderation_mute",
+    "moderation_unmute", "moderation_automod",
 }
 _LOG_USER_EVENTS = {
     "voice_join", "voice_leave", "voice_move", "voice_disconnect", "voice_server_mute",
@@ -97,6 +103,77 @@ _LOG_USER_EVENTS = {
 }
 _LOG_CHANNEL_EVENTS = {"channel_create", "channel_update", "channel_delete"}
 _LOG_ROLE_EVENTS = {"role_create", "role_update", "role_delete"}
+
+# Discord limits communication timeouts to 28 days.  Keep one parser for
+# prefix, slash, and dashboard actions so users can choose a duration in the
+# unit that is most natural to them (for example ``2h`` or ``1w``).
+TIMEOUT_MAX_MINUTES = 28 * 24 * 60
+_TIMEOUT_UNIT_MINUTES = {
+    "m": 1,
+    "min": 1,
+    "mins": 1,
+    "minute": 1,
+    "minutes": 1,
+    "h": 60,
+    "hr": 60,
+    "hrs": 60,
+    "hour": 60,
+    "hours": 60,
+    "d": 24 * 60,
+    "day": 24 * 60,
+    "days": 24 * 60,
+    "w": 7 * 24 * 60,
+    "wk": 7 * 24 * 60,
+    "wks": 7 * 24 * 60,
+    "week": 7 * 24 * 60,
+    "weeks": 7 * 24 * 60,
+}
+
+
+def parse_timeout_duration(value: object) -> tuple[int, str] | None:
+    """Return ``(minutes, display_label)`` for a user-entered duration.
+
+    Plain numbers remain backwards compatible and are interpreted as minutes.
+    Unit suffixes are deliberately forgiving so both compact and readable
+    values work: ``10m``, ``2 hours``, ``1d`` and ``1 week``.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    raw = str(value).strip().casefold()
+    if not raw:
+        return None
+    match = re.fullmatch(r"(\d+)\s*([a-z]+)?", raw)
+    if not match:
+        return None
+    amount = int(match.group(1))
+    unit = match.group(2) or "m"
+    multiplier = _TIMEOUT_UNIT_MINUTES.get(unit)
+    if amount < 1 or multiplier is None:
+        return None
+    minutes = amount * multiplier
+    if minutes > TIMEOUT_MAX_MINUTES:
+        return None
+    labels = {1: "minute", 60: "hour", 24 * 60: "day", 7 * 24 * 60: "week"}
+    label = labels.get(multiplier, "minute")
+    return minutes, f"{amount} {label}{'' if amount == 1 else 's'}"
+
+
+def localized_timeout_duration(label: str, language: str) -> str:
+    """Translate the compact duration label used in Arabic confirmations."""
+    if language != "ar":
+        return label
+    match = re.fullmatch(r"(\d+)\s+(minute|minutes|hour|hours|day|days|week|weeks)", label.strip().casefold())
+    if not match:
+        return label
+    amount = int(match.group(1))
+    unit = match.group(2)
+    arabic_units = {
+        "minute": "دقيقة", "minutes": "دقائق",
+        "hour": "ساعة", "hours": "ساعات",
+        "day": "يوم", "days": "أيام",
+        "week": "أسبوع", "weeks": "أسابيع",
+    }
+    return f"{amount} {arabic_units[unit]}"
 
 
 def _log_person(value: object | None) -> tuple[str | None, str | None]:
@@ -908,6 +985,67 @@ class General(commands.Cog):
         self._spam_windows: dict[tuple[int, int], deque[float]] = {}
         self._raid_windows: dict[int, deque[float]] = {}
         self._automod_in_flight: set[tuple[int, int]] = set()
+        self._ai = AIAssistant()
+        self._ai_tasks: set[asyncio.Task[None]] = set()
+        self._ai_unavailable_logged = False
+
+    def _schedule_ai_reply(self, message: discord.Message) -> None:
+        """Start an AI response without delaying logging or command handling."""
+        config = store.ai_config(str(message.guild.id)) if message.guild else {}
+        if not config.get("enabled") or str(config.get("channel_id") or "") != str(message.channel.id):
+            return
+        if not self._ai.available:
+            if not self._ai_unavailable_logged:
+                print("AI assistant is enabled for a server, but GROQ_API_KEY or the groq package is missing.")
+                self._ai_unavailable_logged = True
+            return
+        task = asyncio.create_task(self._respond_with_ai(message), name=f"ai-reply-{message.id}")
+        self._ai_tasks.add(task)
+        task.add_done_callback(self._ai_tasks.discard)
+
+    async def _respond_with_ai(self, message: discord.Message) -> None:
+        """Generate and send one safe, threaded response for a configured channel."""
+        if not message.guild or message.author.bot:
+            return
+        content = str(message.content or "").strip()
+        if message.attachments:
+            attachments = ", ".join(str(item.filename or "attachment") for item in message.attachments[:8])
+            content = f"{content}\n[Attachments: {attachments}]" if content else f"[Attachments: {attachments}]"
+        if not content:
+            return
+        try:
+            response = await self._ai.complete(str(message.guild.id), str(message.channel.id), content)
+            if not response:
+                return
+            chunks = [response[index:index + 1_900] for index in range(0, len(response), 1_900)]
+            for index, chunk in enumerate(chunks):
+                if index == 0:
+                    await message.reply(
+                        chunk,
+                        mention_author=False,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                else:
+                    await message.channel.send(
+                        chunk,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+        except discord.Forbidden:
+            print(f"AI assistant cannot send messages in #{getattr(message.channel, 'name', message.channel.id)} for guild {message.guild.id}.")
+        except discord.HTTPException as error:
+            print(f"AI assistant Discord send failed for guild {message.guild.id}: {error}")
+        except Exception as error:
+            # Provider errors (401/402/429/5xx, timeouts, and malformed
+            # responses) must not interrupt Discord event processing.
+            print(f"AI assistant request failed for guild {message.guild.id}: {type(error).__name__}: {error}")
+
+    async def close_ai(self) -> None:
+        """Cancel pending replies and release the provider client."""
+        for task in tuple(self._ai_tasks):
+            task.cancel()
+        if self._ai_tasks:
+            await asyncio.gather(*self._ai_tasks, return_exceptions=True)
+        await self._ai.close()
 
     @staticmethod
     def _is_log_delivery_message(message: discord.Message) -> bool:
@@ -1196,6 +1334,7 @@ class General(commands.Cog):
         if message.attachments:
             content += "\nAttachments: " + ", ".join(attachment.filename for attachment in message.attachments[:8])
         await self.write_log(message.guild, "message_sent", actor=message.author, channel=message.channel, details=content[:4_000])
+        self._schedule_ai_reply(message)
 
     @commands.Cog.listener()
     async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
@@ -1960,7 +2099,7 @@ class General(commands.Cog):
         command_name = str(ctx.command.qualified_name if ctx.command else "").replace(" ", "_")
         if command_name == "show_warnings":
             command_name = "show_warning"
-        if command_name in {"ping", "server", "profile", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "mute", "lock", "unlock", "delete"}:
+        if command_name in {"ping", "server", "profile", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "untimeout", "mute", "unmute", "lock", "unlock", "delete"}:
             return bool(store.command_config(str(ctx.guild.id), command_name).get("enabled", True))
         return True
 
@@ -1972,7 +2111,7 @@ class General(commands.Cog):
         command_name = str(getattr(command, "qualified_name", "") or getattr(command, "name", "")).replace(" ", "_")
         if command_name == "show_warnings":
             command_name = "show_warning"
-        if command_name in {"ping", "server", "profile", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "mute", "lock", "unlock", "delete"} and not store.command_config(str(interaction.guild.id), command_name).get("enabled", True):
+        if command_name in {"ping", "server", "profile", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "untimeout", "mute", "unmute", "lock", "unlock", "delete"} and not store.command_config(str(interaction.guild.id), command_name).get("enabled", True):
             language = str(store.command_config(str(interaction.guild.id), command_name).get("language") or "en")
             await interaction.response.send_message(command_message("common", language, "disabled"), ephemeral=True)
             return False
@@ -2505,7 +2644,7 @@ class General(commands.Cog):
         return len(deleted)
 
     async def run_dashboard_command(self, guild: discord.Guild, channel: discord.TextChannel, name: str, requested_by: str, payload: dict[str, Any]) -> None:
-        if name in {"ping", "server", "profile", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "mute", "lock", "unlock", "delete"} and not store.command_config(str(guild.id), name).get("enabled", True):
+        if name in {"ping", "server", "profile", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "untimeout", "mute", "unmute", "lock", "unlock", "delete"} and not store.command_config(str(guild.id), name).get("enabled", True):
             raise ValueError("That command is disabled for this server. Enable it from the website Commands tab first.")
         bot_member = guild.me
         if not bot_member:
@@ -2517,7 +2656,7 @@ class General(commands.Cog):
         # operations themselves; delete similarly only needs moderation
         # permissions to remove messages.
         requires_send_messages = name not in {"lock", "unlock", "delete"} and not (
-            bool(payload.get("silent")) and name in {"kick", "ban", "warning", "unwarning", "timeout", "mute", "unban"}
+            bool(payload.get("silent")) and name in {"kick", "ban", "warning", "unwarning", "timeout", "untimeout", "mute", "unmute", "unban"}
         )
         if not channel_permissions.view_channel or (requires_send_messages and not channel_permissions.send_messages):
             raise ValueError("BirdBot cannot access that channel. Grant it View Channel and Send Messages permissions.")
@@ -2636,13 +2775,16 @@ class General(commands.Cog):
             problem = self.moderation_problem(guild, member)
             if problem:
                 raise ValueError(problem)
-            duration = payload.get("duration_minutes", 10)
-            try:
-                duration = int(duration)
-            except (TypeError, ValueError) as error:
-                raise ValueError(command_message("timeout", language, "invalid_duration")) from error
-            if not 1 <= duration <= 40_320:
+            parsed_duration = parse_timeout_duration(payload.get("duration_minutes", 10))
+            if not parsed_duration:
                 raise ValueError(command_message("timeout", language, "invalid_duration"))
+            duration, duration_label = parsed_duration
+            # The dashboard preserves the unit the manager selected (for
+            # example ``2 hours``) so logs and confirmations stay readable.
+            supplied_duration_label = payload.get("duration_label")
+            if isinstance(supplied_duration_label, str) and supplied_duration_label.strip():
+                duration_label = supplied_duration_label.strip()[:80]
+            response_duration_label = localized_timeout_duration(duration_label, language)
             supplied_reason = str(payload.get("reason") or "").strip()
             reason = (supplied_reason or f"Dashboard action by {requested_by}")[:512]
             display_reason = supplied_reason[:512] or command_message("timeout", language, "no_reason")
@@ -2654,10 +2796,38 @@ class General(commands.Cog):
                 actor=moderator,
                 target=member,
                 channel=channel,
-                details=f"Duration: {duration} minute(s).\nReason: {display_reason}",
+                details=f"Duration: {duration_label}.\nReason: {display_reason}",
             )
             if not payload.get("silent"):
-                await channel.send(command_message("timeout", language, "success", member=member.mention, duration=duration, reason=display_reason), allowed_mentions=discord.AllowedMentions(users=[member]))
+                await channel.send(command_message("timeout", language, "success", member=member.mention, duration=response_duration_label, reason=display_reason), allowed_mentions=discord.AllowedMentions(users=[member]))
+            return
+        if name == "untimeout":
+            if not bot_member.guild_permissions.moderate_members:
+                raise ValueError(command_message("untimeout", language, "dashboard_permission"))
+            member = await resolve_guild_member(guild, str(payload.get("member_id") or ""))
+            if not member:
+                raise ValueError("That member could not be loaded from Discord. Search again and retry in a moment.")
+            problem = self.moderation_problem(guild, member)
+            if problem:
+                raise ValueError(problem)
+            timed_out_until = getattr(member, "timed_out_until", None)
+            if not timed_out_until or timed_out_until <= discord.utils.utcnow():
+                raise ValueError(command_message("untimeout", language, "not_timed_out", member=member.mention))
+            supplied_reason = str(payload.get("reason") or "").strip()
+            reason = (supplied_reason or f"Dashboard action by {requested_by}")[:512]
+            display_reason = supplied_reason[:512] or command_message("untimeout", language, "no_reason")
+            moderator = await resolve_guild_member(guild, str(requested_by), attempts=1, timeout_seconds=4)
+            await member.timeout(None, reason=reason)
+            await self.write_log(
+                guild,
+                "moderation_untimeout",
+                actor=moderator,
+                target=member,
+                channel=channel,
+                details=f"Reason: {display_reason}",
+            )
+            if not payload.get("silent"):
+                await channel.send(command_message("untimeout", language, "success", member=member.mention, reason=display_reason), allowed_mentions=discord.AllowedMentions(users=[member]))
             return
         if name == "mute":
             if not bot_member.guild_permissions.mute_members:
@@ -2685,6 +2855,36 @@ class General(commands.Cog):
             )
             if not payload.get("silent"):
                 await channel.send(command_message("mute", language, "success", member=member.mention), allowed_mentions=discord.AllowedMentions(users=[member]))
+            return
+        if name == "unmute":
+            if not bot_member.guild_permissions.mute_members:
+                raise ValueError(command_message("unmute", language, "dashboard_permission"))
+            member = await resolve_guild_member(guild, str(payload.get("member_id") or ""))
+            if not member:
+                raise ValueError("That member could not be loaded from Discord. Search again and retry in a moment.")
+            problem = self.moderation_problem(guild, member)
+            if problem:
+                raise ValueError(problem)
+            if not member.voice or not member.voice.channel:
+                raise ValueError(command_message("unmute", language, "not_in_voice"))
+            if not member.voice.mute:
+                raise ValueError(command_message("unmute", language, "not_muted", member=member.mention))
+            supplied_reason = str(payload.get("reason") or "").strip()
+            reason = (supplied_reason or f"Dashboard action by {requested_by}")[:512]
+            display_reason = supplied_reason[:512] or command_message("unmute", language, "no_reason")
+            moderator = await resolve_guild_member(guild, str(requested_by), attempts=1, timeout_seconds=4)
+            voice_channel = member.voice.channel
+            await member.edit(mute=False, reason=reason)
+            await self.write_log(
+                guild,
+                "moderation_unmute",
+                actor=moderator,
+                target=member,
+                channel=voice_channel,
+                details=f"Reason: {display_reason}",
+            )
+            if not payload.get("silent"):
+                await channel.send(command_message("unmute", language, "success", member=member.mention), allowed_mentions=discord.AllowedMentions(users=[member]))
             return
         if name in {"lock", "unlock"}:
             await self._set_channel_lock(channel, name == "lock", language)
@@ -3060,7 +3260,7 @@ class General(commands.Cog):
 
     @commands.command(name="timeout")
     @commands.has_guild_permissions(moderate_members=True)
-    async def timeout(self, ctx: commands.Context[commands.Bot], member: discord.Member, duration_minutes: commands.Range[int, 1, 40_320], *, reason: str | None = None) -> None:
+    async def timeout(self, ctx: commands.Context[commands.Bot], member: discord.Member, duration: str, *, reason: str | None = None) -> None:
         if not ctx.guild:
             return
         language = str(store.command_config(str(ctx.guild.id), "timeout").get("language") or "en")
@@ -3071,9 +3271,37 @@ class General(commands.Cog):
         if not ctx.guild.me or not ctx.guild.me.guild_permissions.moderate_members:
             await ctx.send(command_message("timeout", language, "dashboard_permission"))
             return
-        await member.timeout(timedelta(minutes=int(duration_minutes)), reason=reason or f"Requested by {ctx.author}")
-        await self.write_log(ctx.guild, "moderation_timeout", actor=ctx.author, target=member, channel=ctx.channel, details=f"Duration: {duration_minutes} minute(s).\nReason: {reason or command_message('timeout', language, 'no_reason')}")
-        await ctx.send(command_message("timeout", language, "success", member=member.mention, duration=duration_minutes, reason=reason or command_message("timeout", language, "no_reason")), allowed_mentions=discord.AllowedMentions(users=[member]))
+        parsed_duration = parse_timeout_duration(duration)
+        if not parsed_duration:
+            await ctx.send(command_message("timeout", language, "invalid_duration"))
+            return
+        duration_minutes, duration_label = parsed_duration
+        display_reason = str(reason or "").strip()[:512] or command_message("timeout", language, "no_reason")
+        await member.timeout(timedelta(minutes=duration_minutes), reason=display_reason)
+        await self.write_log(ctx.guild, "moderation_timeout", actor=ctx.author, target=member, channel=ctx.channel, details=f"Duration: {duration_label}.\nReason: {display_reason}")
+        await ctx.send(command_message("timeout", language, "success", member=member.mention, duration=localized_timeout_duration(duration_label, language), reason=display_reason), allowed_mentions=discord.AllowedMentions(users=[member]))
+
+    @commands.command(name="untimeout")
+    @commands.has_guild_permissions(moderate_members=True)
+    async def untimeout(self, ctx: commands.Context[commands.Bot], member: discord.Member, *, reason: str | None = None) -> None:
+        if not ctx.guild:
+            return
+        language = str(store.command_config(str(ctx.guild.id), "untimeout").get("language") or "en")
+        problem = self.moderation_problem(ctx.guild, member)
+        if problem:
+            await ctx.send(problem)
+            return
+        if not ctx.guild.me or not ctx.guild.me.guild_permissions.moderate_members:
+            await ctx.send(command_message("untimeout", language, "dashboard_permission"))
+            return
+        timed_out_until = getattr(member, "timed_out_until", None)
+        if not timed_out_until or timed_out_until <= discord.utils.utcnow():
+            await ctx.send(command_message("untimeout", language, "not_timed_out", member=member.mention))
+            return
+        display_reason = str(reason or "").strip()[:512] or command_message("untimeout", language, "no_reason")
+        await member.timeout(None, reason=display_reason)
+        await self.write_log(ctx.guild, "moderation_untimeout", actor=ctx.author, target=member, channel=ctx.channel, details=f"Reason: {display_reason}")
+        await ctx.send(command_message("untimeout", language, "success", member=member.mention, reason=display_reason), allowed_mentions=discord.AllowedMentions(users=[member]))
 
     @commands.command(name="mute")
     @commands.has_guild_permissions(mute_members=True)
@@ -3103,6 +3331,31 @@ class General(commands.Cog):
             details=f"Reason: {display_reason}",
         )
         await ctx.send(command_message("mute", language, "success", member=member.mention), allowed_mentions=discord.AllowedMentions(users=[member]))
+
+    @commands.command(name="unmute")
+    @commands.has_guild_permissions(mute_members=True)
+    async def unmute(self, ctx: commands.Context[commands.Bot], member: discord.Member, *, reason: str | None = None) -> None:
+        if not ctx.guild:
+            return
+        language = str(store.command_config(str(ctx.guild.id), "unmute").get("language") or "en")
+        problem = self.moderation_problem(ctx.guild, member)
+        if problem:
+            await ctx.send(problem)
+            return
+        if not ctx.guild.me or not ctx.guild.me.guild_permissions.mute_members:
+            await ctx.send(command_message("unmute", language, "dashboard_permission"))
+            return
+        if not member.voice or not member.voice.channel:
+            await ctx.send(command_message("unmute", language, "not_in_voice"))
+            return
+        if not member.voice.mute:
+            await ctx.send(command_message("unmute", language, "not_muted", member=member.mention))
+            return
+        display_reason = str(reason or "").strip()[:512] or command_message("unmute", language, "no_reason")
+        voice_channel = member.voice.channel
+        await member.edit(mute=False, reason=display_reason)
+        await self.write_log(ctx.guild, "moderation_unmute", actor=ctx.author, target=member, channel=voice_channel, details=f"Reason: {display_reason}")
+        await ctx.send(command_message("unmute", language, "success", member=member.mention), allowed_mentions=discord.AllowedMentions(users=[member]))
 
     @commands.command(name="lock")
     @commands.has_guild_permissions(manage_channels=True)
@@ -3189,8 +3442,8 @@ class General(commands.Cog):
 
     @app_commands.command(name="timeout", description="Temporarily timeout a server member.")
     @app_commands.default_permissions(moderate_members=True)
-    @app_commands.describe(user="Member to timeout", duration_minutes="Timeout length in minutes (1-40320)", reason="Why the timeout is being applied")
-    async def slash_timeout(self, interaction: discord.Interaction, user: discord.Member, duration_minutes: app_commands.Range[int, 1, 40_320], reason: str | None = None) -> None:
+    @app_commands.describe(user="Member to timeout", duration="Duration such as 10m, 2h, 1d, or 1w (maximum 28 days)", reason="Why the timeout is being applied")
+    async def slash_timeout(self, interaction: discord.Interaction, user: discord.Member, duration: str, reason: str | None = None) -> None:
         if not await self.active_interaction(interaction):
             return
         language = str(store.command_config(str(interaction.guild.id), "timeout").get("language") or "en")  # type: ignore[union-attr]
@@ -3205,9 +3458,44 @@ class General(commands.Cog):
         if not interaction.guild.me or not interaction.guild.me.guild_permissions.moderate_members:  # type: ignore[union-attr]
             await interaction.followup.send(command_message("timeout", language, "dashboard_permission"), ephemeral=True)
             return
-        await user.timeout(timedelta(minutes=int(duration_minutes)), reason=reason or f"Requested by {interaction.user}")
-        await self.write_log(interaction.guild, "moderation_timeout", actor=interaction.user, target=user, channel=interaction.channel, details=f"Duration: {duration_minutes} minute(s).\nReason: {reason or command_message('timeout', language, 'no_reason')}")
-        await interaction.followup.send(command_message("timeout", language, "success", member=user.mention, duration=duration_minutes, reason=reason or command_message("timeout", language, "no_reason")), ephemeral=True, allowed_mentions=discord.AllowedMentions(users=[user]))
+        parsed_duration = parse_timeout_duration(duration)
+        if not parsed_duration:
+            await interaction.followup.send(command_message("timeout", language, "invalid_duration"), ephemeral=True)
+            return
+        duration_minutes, duration_label = parsed_duration
+        display_reason = str(reason or "").strip()[:512] or command_message("timeout", language, "no_reason")
+        await user.timeout(timedelta(minutes=duration_minutes), reason=display_reason)
+        await self.write_log(interaction.guild, "moderation_timeout", actor=interaction.user, target=user, channel=interaction.channel, details=f"Duration: {duration_label}.\nReason: {display_reason}")
+        await interaction.followup.send(command_message("timeout", language, "success", member=user.mention, duration=localized_timeout_duration(duration_label, language), reason=display_reason), ephemeral=True, allowed_mentions=discord.AllowedMentions(users=[user]))
+
+    @app_commands.command(name="untimeout", description="Remove a member's active timeout.")
+    @app_commands.default_permissions(moderate_members=True)
+    @app_commands.describe(user="Member whose timeout should be removed", reason="Why the timeout is being removed")
+    async def slash_untimeout(self, interaction: discord.Interaction, user: discord.Member, reason: str | None = None) -> None:
+        if not await self.active_interaction(interaction):
+            return
+        if not interaction.guild:
+            return
+        language = str(store.command_config(str(interaction.guild.id), "untimeout").get("language") or "en")
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not interaction.user.guild_permissions.moderate_members:
+            await interaction.followup.send(command_message("untimeout", language, "permission"), ephemeral=True)
+            return
+        problem = self.moderation_problem(interaction.guild, user)
+        if problem:
+            await interaction.followup.send(problem, ephemeral=True)
+            return
+        if not interaction.guild.me or not interaction.guild.me.guild_permissions.moderate_members:
+            await interaction.followup.send(command_message("untimeout", language, "dashboard_permission"), ephemeral=True)
+            return
+        timed_out_until = getattr(user, "timed_out_until", None)
+        if not timed_out_until or timed_out_until <= discord.utils.utcnow():
+            await interaction.followup.send(command_message("untimeout", language, "not_timed_out", member=user.mention), ephemeral=True)
+            return
+        display_reason = str(reason or "").strip()[:512] or command_message("untimeout", language, "no_reason")
+        await user.timeout(None, reason=display_reason)
+        await self.write_log(interaction.guild, "moderation_untimeout", actor=interaction.user, target=user, channel=interaction.channel, details=f"Reason: {display_reason}")
+        await interaction.followup.send(command_message("untimeout", language, "success", member=user.mention, reason=display_reason), ephemeral=True, allowed_mentions=discord.AllowedMentions(users=[user]))
 
     @app_commands.command(name="mute", description="Server-mute a member in their current voice channel.")
     @app_commands.default_permissions(mute_members=True)
@@ -3244,6 +3532,38 @@ class General(commands.Cog):
             details=f"Reason: {display_reason}",
         )
         await interaction.followup.send(command_message("mute", language, "success", member=user.mention), ephemeral=True, allowed_mentions=discord.AllowedMentions(users=[user]))
+
+    @app_commands.command(name="unmute", description="Remove a server voice mute from a member.")
+    @app_commands.default_permissions(mute_members=True)
+    @app_commands.describe(user="Member whose server mute should be removed", reason="Why the mute is being removed")
+    async def slash_unmute(self, interaction: discord.Interaction, user: discord.Member, reason: str | None = None) -> None:
+        if not await self.active_interaction(interaction):
+            return
+        if not interaction.guild:
+            return
+        language = str(store.command_config(str(interaction.guild.id), "unmute").get("language") or "en")
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not interaction.user.guild_permissions.mute_members:
+            await interaction.followup.send(command_message("unmute", language, "permission"), ephemeral=True)
+            return
+        problem = self.moderation_problem(interaction.guild, user)
+        if problem:
+            await interaction.followup.send(problem, ephemeral=True)
+            return
+        if not user.voice or not user.voice.channel:
+            await interaction.followup.send(command_message("unmute", language, "not_in_voice"), ephemeral=True)
+            return
+        if not interaction.guild.me or not interaction.guild.me.guild_permissions.mute_members:
+            await interaction.followup.send(command_message("unmute", language, "dashboard_permission"), ephemeral=True)
+            return
+        if not user.voice.mute:
+            await interaction.followup.send(command_message("unmute", language, "not_muted", member=user.mention), ephemeral=True)
+            return
+        display_reason = str(reason or "").strip()[:512] or command_message("unmute", language, "no_reason")
+        voice_channel = user.voice.channel
+        await user.edit(mute=False, reason=display_reason)
+        await self.write_log(interaction.guild, "moderation_unmute", actor=interaction.user, target=user, channel=voice_channel, details=f"Reason: {display_reason}")
+        await interaction.followup.send(command_message("unmute", language, "success", member=user.mention), ephemeral=True, allowed_mentions=discord.AllowedMentions(users=[user]))
 
     @app_commands.command(name="lock", description="Lock this channel for @everyone.")
     @app_commands.default_permissions(manage_channels=True)
@@ -3297,6 +3617,7 @@ class General(commands.Cog):
     @kick.error
     @ban.error
     @mute.error
+    @unmute.error
     async def moderation_error(self, ctx: commands.Context[commands.Bot], error: commands.CommandError) -> None:
         command_name = str(ctx.command.qualified_name if ctx.command else "").split(" ", 1)[0]
         arabic = bool(ctx.guild and store.command_config(str(ctx.guild.id), command_name).get("language") == "ar") if command_name else False
@@ -3308,6 +3629,7 @@ class General(commands.Cog):
             raise error
 
     @timeout.error
+    @untimeout.error
     @lock.error
     @unlock.error
     @delete.error
@@ -3317,10 +3639,10 @@ class General(commands.Cog):
         if isinstance(error, commands.MissingPermissions):
             await ctx.send(command_message(command_name, language, "permission"))
         elif isinstance(error, commands.MissingRequiredArgument):
-            key = "missing_member" if command_name == "timeout" and error.param.name == "member" else "missing_duration" if command_name == "timeout" else "missing_amount"
+            key = "missing_member" if command_name in {"timeout", "untimeout"} and error.param.name == "member" else "missing_duration" if command_name == "timeout" else "missing_amount"
             await ctx.send(command_message(command_name, language, key))
         elif isinstance(error, commands.BadArgument):
-            key = "invalid_member" if command_name == "timeout" else "invalid_duration" if command_name == "timeout" else "invalid_amount"
+            key = "invalid_member" if command_name in {"timeout", "untimeout"} else "invalid_duration" if command_name == "timeout" else "invalid_amount"
             await ctx.send(command_message(command_name, language, key))
         else:
             raise error

@@ -457,6 +457,9 @@ class EyooBot(commands.Bot):
         await self.wait_until_ready()
 
     async def close(self) -> None:
+        general = self.get_cog("General")
+        if general and hasattr(general, "close_ai"):
+            await general.close_ai()
         await self.vc_presence.close()
         await super().close()
 

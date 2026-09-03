@@ -27,6 +27,7 @@ from settings import (  # noqa: E402
     DISCORD_CLIENT_ID,
     DISCORD_CLIENT_SECRET,
     DISCORD_REDIRECT_URI,
+    GROQ_API_KEY,
     SESSION_SECRET,
     SUPPORT_URL,
     SPOTIFY_CLIENT_ID,
@@ -46,6 +47,33 @@ DISCORD_API = "https://discord.com/api/v10"
 ADMINISTRATOR = 0x8
 SUPPORT_ROLE_ERROR = "Error: You do not have the required Support Role to claim or close tickets."
 DISCORD_SNOWFLAKE = re.compile(r"^\d{17,20}$")
+TIMEOUT_MAX_MINUTES = 28 * 24 * 60
+TIMEOUT_UNIT_MINUTES = {
+    "m": 1, "min": 1, "mins": 1, "minute": 1, "minutes": 1,
+    "h": 60, "hr": 60, "hrs": 60, "hour": 60, "hours": 60,
+    "d": 24 * 60, "day": 24 * 60, "days": 24 * 60,
+    "w": 7 * 24 * 60, "wk": 7 * 24 * 60, "wks": 7 * 24 * 60, "week": 7 * 24 * 60, "weeks": 7 * 24 * 60,
+}
+
+
+def parse_timeout_duration(value: object) -> tuple[int, str] | None:
+    """Normalize dashboard timeout input to Discord minutes and a label."""
+    if isinstance(value, bool) or value is None:
+        return None
+    raw = str(value).strip().casefold()
+    match = re.fullmatch(r"(\d+)\s*([a-z]+)?", raw)
+    if not match:
+        return None
+    amount = int(match.group(1))
+    multiplier = TIMEOUT_UNIT_MINUTES.get(match.group(2) or "m")
+    if amount < 1 or multiplier is None:
+        return None
+    minutes = amount * multiplier
+    if minutes > TIMEOUT_MAX_MINUTES:
+        return None
+    labels = {1: "minute", 60: "hour", 24 * 60: "day", 7 * 24 * 60: "week"}
+    unit = labels.get(multiplier, "minute")
+    return minutes, f"{amount} {unit}{'' if amount == 1 else 's'}"
 DISCORD_MESSAGE_LINK = re.compile(
     r"^https?://(?:canary\.|ptb\.)?discord(?:app)?\.com/channels/\d{17,20}/\d{17,20}/\d{17,20}$",
     re.IGNORECASE,
@@ -1302,8 +1330,15 @@ async def manage_guild(guild_id: str, request: Request) -> dict[str, object]:
         {
             "name": "timeout", "label": "/timeout", "category": "Moderation",
             "description": "Temporarily timeout a member.",
-            "usage": "/timeout <member> <minutes> [reason]", "details": "Prevent a member from communicating for a chosen period without removing them.",
-            "options": ["Choose 1–40,320 minutes.", "Reason is optional and included in the moderation log."],
+            "usage": "/timeout <member> <duration> [reason]", "details": "Prevent a member from communicating for a chosen period without removing them.",
+            "options": ["Use minutes, hours, days, or weeks (for example 10m, 2h, 1d, or 1w; maximum 28 days).", "Reason is optional and included in the moderation log."],
+            "requirements": "Requires Moderate Members permission.",
+        },
+        {
+            "name": "untimeout", "label": "/untimeout", "category": "Moderation",
+            "description": "Remove a member's active timeout.",
+            "usage": "/untimeout <member> [reason]", "details": "Restore a member's ability to communicate before their timeout expires.",
+            "options": ["Choose a member with an active timeout.", "Reason is optional and included in the moderation log."],
             "requirements": "Requires Moderate Members permission.",
         },
         {
@@ -1311,6 +1346,13 @@ async def manage_guild(guild_id: str, request: Request) -> dict[str, object]:
             "description": "Server-mute a member in voice.",
             "usage": "/mute <member> [reason]", "details": "Apply a server voice mute to the selected member.",
             "options": ["Target member is required.", "Reason is optional."],
+            "requirements": "Requires Mute Members permission and a member in voice.",
+        },
+        {
+            "name": "unmute", "label": "/unmute", "category": "Moderation",
+            "description": "Remove a server voice mute.",
+            "usage": "/unmute <member> [reason]", "details": "Remove BirdBot's server mute while leaving the member in their current voice channel.",
+            "options": ["Choose a member who is currently server-muted in voice.", "Reason is optional and included in the moderation log."],
             "requirements": "Requires Mute Members permission and a member in voice.",
         },
         {
@@ -1390,6 +1432,9 @@ async def manage_guild(guild_id: str, request: Request) -> dict[str, object]:
         "log_config": store.log_config(guild_id),
         "auto_reacts": store.auto_reacts(guild_id),
         "automod": store.automod_config(guild_id),
+        "ai": store.ai_config(guild_id),
+        # Expose readiness only; never return the provider key to the browser.
+        "ai_available": bool(GROQ_API_KEY),
         "temp_vc": store.temp_vc_config(guild_id),
         "temp_vc_channels": store.temp_vc_channels(guild_id),
         # Placement rows contain no bot credentials. Live online/voice state
@@ -2825,7 +2870,7 @@ async def queue_dashboard_command(guild_id: str, command_name: str, request: Req
     if command_name in {"play", "q"}:
         payload["track"] = command_music_track(payload.get("query"))
     member_id = payload.get("member_id")
-    if command_name in {"profile", "kick", "ban", "warning", "show_warning", "timeout", "mute"}:
+    if command_name in {"profile", "kick", "ban", "warning", "show_warning", "timeout", "untimeout", "mute", "unmute"}:
         if not isinstance(member_id, str) or not DISCORD_SNOWFLAKE.fullmatch(member_id):
             raise HTTPException(status_code=400, detail="Choose a valid server member.")
         # Do not reject a valid ID merely because the dashboard's synchronised
@@ -2835,7 +2880,7 @@ async def queue_dashboard_command(guild_id: str, command_name: str, request: Req
     if command_name == "unban":
         if not isinstance(member_id, str) or not DISCORD_SNOWFLAKE.fullmatch(member_id) or member_id not in {ban["user_id"] for ban in store.bot_bans(guild_id)}:
             raise HTTPException(status_code=404, detail="Choose a current ban entry.")
-    if command_name in {"kick", "ban", "warning", "timeout", "mute"}:
+    if command_name in {"kick", "ban", "warning", "timeout", "untimeout", "mute", "unmute"}:
         reason = payload.get("reason", "")
         if not isinstance(reason, str) or len(reason) > 512:
             raise HTTPException(status_code=400, detail="The reason must be 512 characters or fewer.")
@@ -2852,12 +2897,15 @@ async def queue_dashboard_command(guild_id: str, command_name: str, request: Req
             raise HTTPException(status_code=400, detail="Enter a valid warning number.")
         payload["warning_id"] = warning_id
     if command_name == "timeout":
-        duration = payload.get("duration_minutes", 10)
-        if isinstance(duration, str) and duration.isdigit():
-            duration = int(duration)
-        if isinstance(duration, bool) or not isinstance(duration, int) or not 1 <= duration <= 40_320:
-            raise HTTPException(status_code=400, detail="Timeout duration must be between 1 minute and 40,320 minutes.")
-        payload["duration_minutes"] = duration
+        # The dashboard sends a friendly amount/unit pair. Accept the old
+        # minute-only field too so saved clients and API users remain valid.
+        amount = payload.get("duration_amount")
+        unit = str(payload.get("duration_unit") or "m").strip().casefold()
+        raw_duration = payload.get("duration_minutes", 10) if amount in (None, "") else f"{amount}{unit}"
+        parsed_duration = parse_timeout_duration(raw_duration)
+        if not parsed_duration:
+            raise HTTPException(status_code=400, detail="Use a valid timeout such as 10m, 2h, 1d, or 1w (maximum 28 days).")
+        payload["duration_minutes"], payload["duration_label"] = parsed_duration
     if command_name == "delete":
         amount = payload.get("amount", 10)
         if isinstance(amount, str) and amount.isdigit():
@@ -3321,6 +3369,18 @@ def parse_auto_react_payload(payload: object) -> tuple[str | None, str, str, boo
     return normalized_rule_id, channel_id, emoji, enabled
 
 
+def parse_ai_payload(payload: object, current: dict[str, object]) -> dict[str, object]:
+    """Validate the per-server AI toggle and its response channel."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid AI assistant settings.")
+    enabled = dashboard_bool(payload.get("enabled"), default=bool(current.get("enabled", False)))
+    channel_value = payload.get("channel_id", current.get("channel_id"))
+    channel_id = _dashboard_snowflake(channel_value, allow_empty=True)
+    if enabled and not channel_id:
+        raise HTTPException(status_code=400, detail="Choose a text channel for the AI assistant.")
+    return {"enabled": enabled, "channel_id": channel_id}
+
+
 def parse_automod_payload(payload: object, current: dict[str, object]) -> dict[str, object]:
     """Validate the Bot Settings Automod form and keep moderation conservative."""
     if not isinstance(payload, dict):
@@ -3365,6 +3425,15 @@ def parse_automod_payload(payload: object, current: dict[str, object]) -> dict[s
         if word.casefold() not in {item.casefold() for item in words}:
             words.append(word)
 
+    timeout_amount = payload.get("auto_timeout_amount")
+    if timeout_amount not in (None, ""):
+        parsed_auto_timeout = parse_timeout_duration(f"{timeout_amount}{str(payload.get('auto_timeout_unit') or 'm').strip().casefold()}")
+        if not parsed_auto_timeout:
+            raise HTTPException(status_code=400, detail="Use a valid Auto-timeout duration such as 10m, 2h, 1d, or 1w (maximum 28 days).")
+        auto_timeout_minutes = parsed_auto_timeout[0]
+    else:
+        auto_timeout_minutes = integer("auto_timeout_minutes", int(current.get("auto_timeout_minutes", 10)), 1, TIMEOUT_MAX_MINUTES)
+
     return {
         "enabled": boolean("enabled", bool(current.get("enabled", False))),
         "anti_link": boolean("anti_link", bool(current.get("anti_link", False))),
@@ -3378,7 +3447,7 @@ def parse_automod_payload(payload: object, current: dict[str, object]) -> dict[s
         "spam_window_seconds": integer("spam_window_seconds", int(current.get("spam_window_seconds", 8)), 3, 60),
         "raid_join_limit": integer("raid_join_limit", int(current.get("raid_join_limit", 8)), 3, 50),
         "raid_window_seconds": integer("raid_window_seconds", int(current.get("raid_window_seconds", 10)), 5, 120),
-        "auto_timeout_minutes": integer("auto_timeout_minutes", int(current.get("auto_timeout_minutes", 10)), 1, 28 * 24 * 60),
+        "auto_timeout_minutes": auto_timeout_minutes,
     }
 
 
@@ -3387,7 +3456,43 @@ async def get_dashboard_bot_settings(guild_id: str, request: Request) -> dict[st
     await verified_guild_manager(guild_id, request)
     if not store.is_guild_activated(guild_id):
         raise HTTPException(status_code=409, detail="Enable BirdBot for this server before managing Bot Settings.")
-    return {"auto_reacts": store.auto_reacts(guild_id), "automod": store.automod_config(guild_id)}
+    return {
+        "auto_reacts": store.auto_reacts(guild_id),
+        "automod": store.automod_config(guild_id),
+        "ai": store.ai_config(guild_id),
+        "ai_available": bool(GROQ_API_KEY),
+    }
+
+
+@app.get("/api/guilds/{guild_id}/control/bot-settings/ai")
+async def get_dashboard_ai(guild_id: str, request: Request) -> dict[str, object]:
+    await verified_guild_manager(guild_id, request)
+    if not store.is_guild_activated(guild_id):
+        raise HTTPException(status_code=409, detail="Enable BirdBot for this server before managing Bot Settings.")
+    return {"ai": store.ai_config(guild_id), "available": bool(GROQ_API_KEY)}
+
+
+@app.post("/api/guilds/{guild_id}/control/bot-settings/ai")
+async def save_dashboard_ai(guild_id: str, request: Request) -> dict[str, object]:
+    user, _ = await verified_guild_manager(guild_id, request)
+    if not store.is_guild_activated(guild_id):
+        raise HTTPException(status_code=409, detail="Enable BirdBot for this server before changing Bot Settings.")
+    try:
+        payload = await request.json()
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid AI assistant settings.") from error
+    current = store.ai_config(guild_id)
+    normalized = parse_ai_payload(payload, current)
+    channel_id = normalized.get("channel_id")
+    if channel_id and channel_id not in {str(channel.get("id")) for channel in store.bot_text_channels(guild_id)}:
+        raise HTTPException(status_code=404, detail="BirdBot cannot access that AI text channel.")
+    config = store.save_ai_config(
+        guild_id,
+        enabled=bool(normalized["enabled"]),
+        channel_id=str(channel_id) if channel_id else None,
+        updated_by=str(user["id"]),
+    )
+    return {"ai": config, "available": bool(GROQ_API_KEY), "status": "saved"}
 
 
 @app.post("/api/guilds/{guild_id}/control/bot-settings/automod")

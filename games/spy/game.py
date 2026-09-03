@@ -131,16 +131,29 @@ def secret_kind_label(lobby: SpyLobby) -> str:
 
 def result_embed(guild: discord.Guild, lobby: SpyLobby, *, spy_won: bool) -> discord.Embed:
     """Render the final result with a prominent winner and typed secret."""
+    winners = tuple(lobby.winner_ids)
+    winner_mentions = ", ".join(f"<@{player_id}>" for player_id in winners)
+    if len(winners) == 1:
+        winner_line_en = f"🏆 User {winner_mentions} is the winner!"
+        winner_line_ar = f"\U0001F3C6 \u0627\u0644\u0641\u0627\u0626\u0632 \u0647\u0648 {winner_mentions}!"
+    elif winners:
+        winner_line_en = f"🏆 Winners: {winner_mentions}"
+        winner_line_ar = f"\U0001F3C6 \u0627\u0644\u0641\u0627\u0626\u0632\u0648\u0646: {winner_mentions}"
+    else:
+        winner_line_en = "⚠️ No winner was recorded."
+        winner_line_ar = "\u26A0\uFE0F \u0644\u0645 \u064a\u062a\u0645 \u062a\u0633\u062c\u064a\u0644 \u0641\u0627\u0626\u0632."
     if lobby.language == "ar":
-        title = "فاز الجاسوس" if spy_won else "فاز المواطنون"
+        title = "⚠️ انتهت لعبة الجاسوس" if not winners else ("🏆 فاز الجاسوس" if spy_won else "🏆 فاز المواطنون")
         description = (
+            f"{winner_line_ar}\n\n"
             f"**الجاسوس:** {lobby.spy_name or 'غير معروف'}\n\n"
             f"**{secret_kind_label(lobby)}:** {lobby.secret or 'غير معروف'}"
         )
         footer = "انتهت لعبة الجاسوس."
     else:
-        title = "The Spy Won" if spy_won else "The Citizens Won"
+        title = "⚠️ Spy Game ended" if not winners else ("🏆 The Spy Won" if spy_won else "🏆 The Citizens Won")
         description = (
+            f"{winner_line_en}\n\n"
             f"**Spy:** {lobby.spy_name or 'Unknown'}\n\n"
             f"**{secret_kind_label(lobby)}:** {lobby.secret or 'Unknown'}"
         )
@@ -190,6 +203,11 @@ def configured_button_emoji(name: str) -> discord.PartialEmoji | str | None:
     return raw[:32]
 
 
+def _spy_button_emoji(name: str, default: str) -> discord.PartialEmoji | str:
+    """Use a configured emoji or a safe built-in Unicode fallback."""
+    return configured_button_emoji(name) or default
+
+
 @dataclass
 class SpyLobby:
     guild_id: int
@@ -211,6 +229,7 @@ class SpyLobby:
     secret_type: str = "location"
     spy_id: int | None = None
     spy_name: str | None = None
+    winner_ids: tuple[int, ...] = field(default_factory=tuple)
     result_text: str | None = None
     # Interaction tokens are short-lived, but retaining the object lets us
     # send a private ephemeral fallback for closed DMs after /start.
@@ -268,10 +287,10 @@ def lobby_embed(guild: discord.Guild, lobby: SpyLobby) -> discord.Embed:
     if lobby.finished:
         description = lobby.result_text or ("انتهت هذه الجولة." if arabic else "This match has finished.")
         title = (
-            "لعبة الجاسوس · انتهت مهلة الردهة" if arabic and lobby.cancelled
-            else "Spy Game · Lobby timed out" if lobby.cancelled
-            else "لعبة الجاسوس · انتهت الجولة" if arabic
-            else "Spy Game · Match finished"
+            "🏁 لعبة الجاسوس · انتهت مهلة الردهة" if arabic and lobby.cancelled
+            else "🏁 Spy Game · Lobby timed out" if lobby.cancelled
+            else "🏆 لعبة الجاسوس · انتهت الجولة" if arabic
+            else "🏆 Spy Game · Match finished"
         )
     elif lobby.started and lobby.vote_started:
         description = (
@@ -287,7 +306,7 @@ def lobby_embed(guild: discord.Guild, lobby: SpyLobby) -> discord.Embed:
             if lobby.language == "en"
             else "بدأت الجولة. تم إرسال الأدوار سراً لكل لاعب.\nيمكن للمضيف كشف النتائج عند انتهاء الجولة."
         )
-        title = "لعبة الجاسوس · الجولة جارية" if arabic else "Spy Game · Match in progress"
+        title = "🎬 لعبة الجاسوس · الجولة جارية" if arabic else "🎬 Spy Game · Match in progress"
     else:
         description = (
             f"Join the lobby, then the host can start when at least {lobby.minimum_players} players are ready.\n"
@@ -295,9 +314,20 @@ def lobby_embed(guild: discord.Guild, lobby: SpyLobby) -> discord.Embed:
             if lobby.language == "en"
             else f"انضم إلى الردهة، ويمكن للمضيف البدء عند جاهزية {lobby.minimum_players} لاعبين على الأقل.\nاللغة: {language}"
         )
-        title = "لعبة الجاسوس · الردهة" if arabic else "Spy Game · Lobby"
+        title = "🎮 لعبة الجاسوس · الردهة" if arabic else "🎮 Spy Game · Lobby"
     embed = spy_embed(guild, title=title, description=description)
     embed.add_field(name="اللاعبون" if arabic else "Players", value=f"{len(lobby.players)} / {lobby.maximum_players}", inline=True)
+    if lobby.players:
+        participants = "\n".join(
+            f"{index}. <@{player_id}>"
+            for index, player_id in enumerate(lobby.players, start=1)
+        )
+        if len(participants) <= 1024:
+            embed.add_field(
+                name="المشاركون" if arabic else "Participants",
+                value=participants,
+                inline=False,
+            )
     embed.add_field(name="الحد الأدنى" if arabic else "Minimum", value=str(lobby.minimum_players), inline=True)
     if lobby.started and not lobby.vote_started:
         mode_text = (
@@ -552,7 +582,7 @@ def turn_embed(guild: discord.Guild, lobby: SpyLobby, remaining: int) -> discord
     seconds = max(0, int(remaining))
     clock = f"{seconds // 60:02d}:{seconds % 60:02d}"
     if arabic:
-        title = f"جولة الأسئلة · الدور {lobby.turn_number}"
+        title = f"❓ جولة الأسئلة · الدور {lobby.turn_number}"
         description = (
             f"**{asker}** يسأل **{answerer}**.\n"
             f"الوقت المتبقي: **{clock}**\n"
@@ -560,7 +590,7 @@ def turn_embed(guild: discord.Guild, lobby: SpyLobby, remaining: int) -> discord
         )
         footer = "BirdBot · لعبة الجاسوس"
     else:
-        title = f"Question turn · Round {lobby.turn_number}"
+        title = f"❓ Question turn · Round {lobby.turn_number}"
         description = (
             f"**{asker}** asks **{answerer}**.\n"
             f"Time remaining: **{clock}**\n"
@@ -623,7 +653,7 @@ def vote_embed(guild: discord.Guild, lobby: SpyLobby, remaining: int) -> discord
     votes = len(lobby.vote_choices)
     total = len(lobby.players)
     if lobby.language == "ar":
-        title = "لعبة الجاسوس · التصويت"
+        title = "🗳️ لعبة الجاسوس · التصويت"
         description = (
             "اختر اللاعب الذي تعتقد أنه الجاسوس.\n"
             f"الوقت المتبقي: **{clock}**\n"
@@ -631,7 +661,7 @@ def vote_embed(guild: discord.Guild, lobby: SpyLobby, remaining: int) -> discord
         )
         footer = "يحتاج كل لاعب إلى التصويت مرة واحدة."
     else:
-        title = "Spy Game · Vote"
+        title = "🗳️ Spy Game · Vote"
         description = (
             "Choose the player you believe is the Spy.\n"
             f"Time remaining: **{clock}**\n"
@@ -718,14 +748,12 @@ class SpyLobbyView(SafeView):
         super().__init__(timeout=1_800)
         self.lobby = lobby
         # Discord cannot render an arbitrary Icons8 URL as a component emoji;
-        # remote raster icons are used by the web controls instead. Keep these
-        # Discord labels monochrome and bilingual so they render consistently
-        # on every client without Windows emoji substitutions.
+        # use configured Discord/Unicode emoji with safe built-in fallbacks.
         labels = ("دخول", "خروج", "اللاعبون", "بدء اللعبة") if lobby.language == "ar" else ("Join", "Leave", "Players", "Start Game")
-        self.join_button = discord.ui.Button(label=labels[0], style=discord.ButtonStyle.secondary, emoji=configured_button_emoji("SPY_JOIN_EMOJI"), custom_id=f"birdbot:games:join:{lobby.guild_id}:{lobby.host_id}"[:100])
-        self.leave_button = discord.ui.Button(label=labels[1], style=discord.ButtonStyle.secondary, emoji=configured_button_emoji("SPY_LEAVE_EMOJI"), custom_id=f"birdbot:games:leave:{lobby.guild_id}:{lobby.host_id}"[:100])
-        self.players_button = discord.ui.Button(label=labels[2], style=discord.ButtonStyle.secondary, emoji=configured_button_emoji("SPY_PLAYERS_EMOJI"), custom_id=f"birdbot:games:players:{lobby.guild_id}:{lobby.host_id}"[:100])
-        self.start_button = discord.ui.Button(label=labels[3], style=discord.ButtonStyle.secondary, emoji=configured_button_emoji("SPY_START_EMOJI"), custom_id=f"birdbot:games:start:{lobby.guild_id}:{lobby.host_id}"[:100])
+        self.join_button = discord.ui.Button(label=labels[0], style=discord.ButtonStyle.secondary, emoji=_spy_button_emoji("SPY_JOIN_EMOJI", "🎮"), custom_id=f"birdbot:games:join:{lobby.guild_id}:{lobby.host_id}"[:100])
+        self.leave_button = discord.ui.Button(label=labels[1], style=discord.ButtonStyle.secondary, emoji=_spy_button_emoji("SPY_LEAVE_EMOJI", "🚪"), custom_id=f"birdbot:games:leave:{lobby.guild_id}:{lobby.host_id}"[:100])
+        self.players_button = discord.ui.Button(label=labels[2], style=discord.ButtonStyle.secondary, emoji=_spy_button_emoji("SPY_PLAYERS_EMOJI", "👥"), custom_id=f"birdbot:games:players:{lobby.guild_id}:{lobby.host_id}"[:100])
+        self.start_button = discord.ui.Button(label=labels[3], style=discord.ButtonStyle.secondary, emoji=_spy_button_emoji("SPY_START_EMOJI", "▶️"), custom_id=f"birdbot:games:start:{lobby.guild_id}:{lobby.host_id}"[:100])
         self.join_button.callback = self.join
         self.leave_button.callback = self.leave
         self.players_button.callback = self.show_players
@@ -920,8 +948,16 @@ class SpyLobbyView(SafeView):
         if not await self._check_guild(interaction):
             return
         self.lobby.player_interactions[interaction.user.id] = interaction
-        names = [f"{index}. {name}" for index, name in enumerate(self.lobby.players.values(), start=1)]
-        await interaction.edit_original_response(content="\n".join(names) or self._text("No players have joined yet.", "لم ينضم أي لاعب بعد."))
+        names = [f"{index}. <@{player_id}>" for index, player_id in enumerate(self.lobby.players, start=1)]
+        if names:
+            header = self._text(
+                f"👥 Players ({len(names)}):",
+                f"👥 اللاعبون ({len(names)}):",
+            )
+            content = header + "\n" + "\n".join(names)
+        else:
+            content = self._text("No players have joined yet.", "لم ينضم أي لاعب بعد.")
+        await interaction.edit_original_response(content=content)
         await self._deliver_pending(interaction)
 
     async def _start_after_ack(self, interaction: discord.Interaction) -> None:
@@ -1246,6 +1282,7 @@ class SpyLobbyView(SafeView):
         lobby.turn_task = None
         if outcome_error:
             spy_won = False
+            lobby.winner_ids = ()
             lobby.result_text = (
                 "تعذر إكمال التصويت، لذلك انتهت الجولة دون نتيجة."
                 if lobby.language == "ar"
@@ -1257,6 +1294,10 @@ class SpyLobbyView(SafeView):
                 counts[target_id] = counts.get(target_id, 0) + 1
             voted_id = max(counts, key=counts.get) if counts else None
             spy_won = voted_id != lobby.spy_id
+            if spy_won:
+                lobby.winner_ids = (lobby.spy_id,) if lobby.spy_id is not None else ()
+            else:
+                lobby.winner_ids = tuple(player_id for player_id in lobby.players if player_id != lobby.spy_id)
             if voted_id == lobby.spy_id:
                 lobby.result_text = (
                     f"تم العثور على الجاسوس: {lobby.spy_name or 'غير معروف'}. فاز المواطنون!"

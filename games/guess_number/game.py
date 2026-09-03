@@ -20,6 +20,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from discord_members import resolve_guild_member
+from games.spy.game import configured_button_emoji
 from storage import store
 
 
@@ -37,6 +38,11 @@ def _text(game: "GuessNumberGame", english: str, arabic: str) -> str:
 
 def _mention(user_id: int) -> str:
     return f"<@{user_id}>"
+
+
+def _game_button_emoji(name: str, default: str) -> discord.PartialEmoji | str:
+    """Use an optional custom emoji, with a readable Unicode fallback."""
+    return configured_button_emoji(name) or default
 
 
 @dataclass
@@ -105,7 +111,7 @@ def unregister_game(game: GuessNumberGame) -> None:
 
 def game_embed(game: GuessNumberGame) -> discord.Embed:
     arabic = game.language == "ar"
-    title = "خمن الرقم" if arabic else "Guess the Number"
+    title = "🔢 خمن الرقم" if arabic else "🔢 Guess the Number"
     if game.cancelled:
         description = (
             (
@@ -124,21 +130,23 @@ def game_embed(game: GuessNumberGame) -> discord.Embed:
         winners = game.winner_ids or ((game.winner_id,) if game.winner_id else ())
         winner = ", ".join(_mention(player_id) for player_id in winners) or "—"
         description = (
-            f"الفائزون: {winner}\nالرقم كان **{game.target}**."
+            (f"🏆 الفائز هو {winner}!" if len(winners) == 1 else f"🏆 الفائزون: {winner}")
+            + f"\n🎯 كان الرقم **{game.target}**."
             if arabic
-            else f"Winner{'s' if len(winners) != 1 else ''}: {winner}\nThe number was **{game.target}**."
+            else ((f"🏆 User {winner} is the winner!" if len(winners) == 1 else f"🏆 Winners: {winner}")
+                  + f"\n🎯 The number was **{game.target}**.")
         )
     elif not game.started:
         description = _text(
             game,
-            f"Join the lobby, then {_mention(game.host_id)} can start it. Each player gets one guess per round.",
+            f"👋 Join the lobby, then {_mention(game.host_id)} can start it. Each player gets one guess per round.",
             f"انضم إلى الرَدْهة، ثم يمكن لـ {_mention(game.host_id)} بدء اللعبة. يحصل كل لاعب على تخمين واحد في كل جولة.",
         )
     else:
         pending = len(game.active_players) - len(game.guesses)
         description = _text(
             game,
-            f"The round card below has the Guess number button. Waiting for **{pending}** player(s).",
+            f"🎯 The round card below has the Guess number button. Waiting for **{pending}** player(s).",
             f"أرسل تخمينًا واحدًا من الزر أدناه. ننتظر **{pending}** لاعبًا.",
         )
         if game.hint:
@@ -185,14 +193,14 @@ def _round_hint(game: GuessNumberGame) -> str:
         game.lower_bound = max(game.lower_bound, maximum_guess + 1)
         return _text(
             game,
-            f"Hint: the number is higher than **{maximum_guess}**.",
+            f"💡 Hint: the number is higher than **{maximum_guess}**.",
             f"تلميح: الرقم أكبر من **{maximum_guess}**.",
         )
     if minimum_guess > game.target:
         game.upper_bound = min(game.upper_bound, minimum_guess - 1)
         return _text(
             game,
-            f"Hint: the number is lower than **{minimum_guess}**.",
+            f"💡 Hint: the number is lower than **{minimum_guess}**.",
             f"تلميح: الرقم أصغر من **{minimum_guess}**.",
         )
     # Guesses straddle the answer.  The target must be between the nearest
@@ -203,7 +211,7 @@ def _round_hint(game: GuessNumberGame) -> str:
     game.upper_bound = min(game.upper_bound, upper - 1)
     return _text(
         game,
-        f"Hint: the number is between **{lower}** and **{upper}**.",
+        f"💡 Hint: the number is between **{lower}** and **{upper}**.",
         f"تلميح: الرقم بين **{lower}** و **{upper}**.",
     )
 
@@ -211,10 +219,10 @@ def _round_hint(game: GuessNumberGame) -> str:
 def round_embed(game: GuessNumberGame) -> discord.Embed:
     """Build the separate round card that owns the Guess number button."""
     arabic = game.language == "ar"
-    title = "خمن الرقم" if arabic else "Guess the number"
+    title = "🔢 خمن الرقم" if arabic else "🔢 Guess the number"
     description = _text(
         game,
-        f"Round **{game.round_number}** is open. Each active player may submit one guess.",
+        f"🎯 Round **{game.round_number}** is open. Each active player may submit one guess.",
         f"الجولة **{game.round_number}** مفتوحة. يمكن لكل لاعب نشط إرسال تخمين واحد.",
     )
     if game.hint:
@@ -230,24 +238,34 @@ def round_embed(game: GuessNumberGame) -> discord.Embed:
         value=f"{len(game.guesses)} / {len(game.active_players)}",
         inline=True,
     )
+    if game.guesses:
+        used = ", ".join(f"**{value}**" for value in game.guesses.values())
+        embed.add_field(
+            name="Used guesses" if not arabic else "التخمينات المستخدمة",
+            value=used,
+            inline=False,
+        )
     embed.set_footer(text="BirdBot · Guess the number" if not arabic else "BirdBot · خمن الرقم")
     return embed
 
 
-def guess_progress_text(game: GuessNumberGame, member_id: int, remaining: int) -> str:
+def guess_progress_text(game: GuessNumberGame, member_id: int, value: int, remaining_player_ids: list[int]) -> str:
     mention = _mention(member_id)
+    remaining = len(remaining_player_ids)
+    remaining_mentions = ", ".join(_mention(player_id) for player_id in remaining_player_ids)
+    remaining_text = remaining_mentions or ("none" if game.language != "ar" else "لا أحد")
     return _text(
         game,
-        f"{mention} has finished guessing. Remaining players: {remaining}.",
-        f"أنهى {mention} التخمين. اللاعبون المتبقون: {remaining}.",
+        f"✅ User {mention} guessed number **{value}**. Remaining players: **{remaining}** — {remaining_text}.",
+        f"✅ خمّن {mention} الرقم **{value}**. اللاعبون المتبقون: **{remaining}** — {remaining_text}.",
     )
 
 
 def round_transition_text(game: GuessNumberGame, finished_round: int, next_round: int) -> str:
     return _text(
         game,
-        f"Round {finished_round} finished. Round {next_round} begins.",
-        f"انتهت الجولة {finished_round}. تبدأ الجولة {next_round}.",
+        f"🔄 Round {finished_round} finished. Round {next_round} begins.",
+        f"🔄 انتهت الجولة {finished_round}. تبدأ الجولة {next_round}.",
     )
 
 
@@ -257,7 +275,7 @@ def _legacy_collapsed_range_text(game: GuessNumberGame, winners: list[int]) -> s
     number = game.target if game.target is not None else game.lower_bound
     return _text(
         game,
-        f"The range narrowed to **{number}**, so the number was **{number}**. Range winners: {mentions}. They advance to the next round.",
+        f"🎯 The range narrowed to **{number}**, so the number was **{number}**. Range winners: {mentions}. They advance to the next round.",
         f"Ø§Ù†Ø­ØµØ± Ø§Ù„Ù†Ø·Ø§Ù‚ ÙÙŠ **{number}**ØŒ Ù„Ø°Ù„Ùƒ ÙƒØ§Ù† Ø§Ù„Ø±Ù‚Ù… **{number}**. Ø§Ù„ÙØ§Ø¦Ø²ÙˆÙ†: {mentions}.",
     )
 
@@ -277,7 +295,7 @@ def collapsed_range_text(game: GuessNumberGame, winners: list[int]) -> str:
     number = game.target if game.target is not None else game.lower_bound
     return _text(
         game,
-        f"The range narrowed to **{number}**, so the number was **{number}**. Range winners: {mentions}. They advance to the next round.",
+        f"🎯 The range narrowed to **{number}**, so the number was **{number}**. Range winners: {mentions}. They advance to the next round.",
         f"\u0627\u0646\u062d\u0635\u0631 \u0627\u0644\u0646\u0637\u0627\u0642 \u0641\u064a **{number}**\u060c \u0644\u0630\u0644\u0643 \u0643\u0627\u0646 \u0627\u0644\u0631\u0642\u0645 **{number}**. \u0641\u0627\u0626\u0632\u0648 \u0627\u0644\u0646\u0637\u0627\u0642: {mentions}. \u064a\u0646\u062a\u0642\u0644\u0648\u0646 \u0625\u0644\u0649 \u0627\u0644\u062c\u0648\u0644\u0629 \u0627\u0644\u062a\u0627\u0644\u064a\u0629.",
     )
 
@@ -447,15 +465,22 @@ async def submit_guess(game: GuessNumberGame, member_id: int, value: int) -> str
                 f"Choose a number from {game.lower_bound} to {game.upper_bound}.",
                 f"اختر رقمًا من {game.lower_bound} إلى {game.upper_bound}.",
             )
+        if value in game.guesses.values():
+            return _text(
+                game,
+                f"Number **{value}** was already guessed this round. Choose a different number.",
+                f"تم تخمين الرقم **{value}** في هذه الجولة. اختر رقمًا مختلفًا.",
+            )
         game.guesses[member_id] = value
-        remaining = len(game.active_players) - len(game.guesses)
+        remaining_player_ids = sorted(game.active_players - set(game.guesses))
+        remaining = len(remaining_player_ids)
         if game.round_message is not None:
             try:
                 await game.round_message.edit(embed=round_embed(game), view=game.round_view)
             except (discord.HTTPException, discord.Forbidden, discord.NotFound):
                 pass
         try:
-            await game.channel.send(guess_progress_text(game, member_id, remaining))
+            await game.channel.send(guess_progress_text(game, member_id, value, remaining_player_ids))
         except (discord.HTTPException, discord.Forbidden, discord.NotFound):
             # The private interaction still receives the result if the public
             # progress message cannot be posted.
@@ -514,6 +539,7 @@ class GuessNumberView(discord.ui.View):
             guess = discord.ui.Button(
                 label="خمن الرقم" if arabic else "Guess number",
                 style=discord.ButtonStyle.primary,
+                emoji=_game_button_emoji("GUESS_NUMBER_GUESS_EMOJI", "🔢"),
                 custom_id=f"birdbot:guess_number:guess:{game.guild.id}:{game.channel.id}",
             )
             guess.callback = self.guess
@@ -525,16 +551,19 @@ class GuessNumberView(discord.ui.View):
         join = discord.ui.Button(
             label="انضمام" if arabic else "Join",
             style=discord.ButtonStyle.secondary,
+            emoji=_game_button_emoji("GUESS_NUMBER_JOIN_EMOJI", "🎮"),
             custom_id=f"birdbot:guess_number:join:{game.guild.id}:{game.channel.id}",
         )
         leave = discord.ui.Button(
             label="مغادرة" if arabic else "Leave",
             style=discord.ButtonStyle.secondary,
+            emoji=_game_button_emoji("GUESS_NUMBER_LEAVE_EMOJI", "🚪"),
             custom_id=f"birdbot:guess_number:leave:{game.guild.id}:{game.channel.id}",
         )
         start = discord.ui.Button(
             label="بدء" if arabic else "Start",
             style=discord.ButtonStyle.secondary,
+            emoji=_game_button_emoji("GUESS_NUMBER_START_EMOJI", "▶️"),
             custom_id=f"birdbot:guess_number:start:{game.guild.id}:{game.channel.id}",
         )
         join.callback = self.join
