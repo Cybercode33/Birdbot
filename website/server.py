@@ -18,6 +18,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -423,6 +424,24 @@ app.add_middleware(
     same_site="lax",
     https_only=bool(DISCORD_REDIRECT_URI and DISCORD_REDIRECT_URI.startswith("https://")),
 )
+# The dashboard ships a sizeable JavaScript/CSS bundle and several JSON
+# payloads. Compress responses at the edge of the application so hosts that
+# do not provide a reverse-proxy compression layer load the UI much faster.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+
+
+@app.middleware("http")
+async def cache_static_assets(request: Request, call_next):
+    """Allow versioned frontend assets to be reused between page navigations."""
+    response = await call_next(request)
+    if request.method == "GET" and request.url.path.startswith("/assets/"):
+        # Every asset URL carries a version query string. A long immutable
+        # cache therefore never serves an old bundle after a deployment while
+        # avoiding a network round-trip on every dashboard navigation.
+        response.headers.setdefault("Cache-Control", "public, max-age=86400, stale-while-revalidate=604800")
+    return response
+
+
 app.mount("/assets", StaticFiles(directory=ROOT_DIR / "website"), name="assets")
 app.mount("/uploads/ticket-icons", StaticFiles(directory=TICKET_ICON_DIR), name="ticket-icons")
 app.mount("/uploads/bot-profile-avatars", StaticFiles(directory=BOT_PROFILE_AVATAR_DIR), name="bot-profile-avatars")
@@ -571,7 +590,7 @@ async def discord_callback(request: Request, code: str | None = None, state: str
     )
     request.session["discord_user"] = user
     request.session["oauth_session_id"] = oauth_session_id
-    # Let the signed-in user choose the management or member music portal.
+    # Let the signed-in user choose the management or member Profile portal.
     return RedirectResponse("/?portal=1", status_code=303)
 
 
@@ -1236,6 +1255,49 @@ async def session_status(request: Request) -> dict[str, object]:
     return {"authenticated": bool(user), "user": user}
 
 
+@app.get("/api/profile")
+async def member_profile(request: Request) -> dict[str, object]:
+    """Return activity collected for the signed-in member across bot servers."""
+    user = logged_in_user(request)
+    user_guilds = await discord_user_guilds(request, user)
+    bot_guilds = store.bot_guilds()
+    guild_ids = [guild_id for guild_id in bot_guilds if guild_id in user_guilds]
+    totals = store.profile_activity_totals(user["id"], guild_ids)
+    server_rows: list[dict[str, object]] = []
+    for row in totals.get("servers", []):
+        guild_id = str(row.get("guild_id") or "")
+        bot_guild = bot_guilds.get(guild_id) or {}
+        oauth_guild = user_guilds.get(guild_id) or {}
+        messages = int(row.get("message_count") or 0)
+        images = int(row.get("image_count") or 0)
+        voice_seconds = int(row.get("voice_seconds") or 0)
+        server_rows.append(
+            {
+                "guild_id": guild_id,
+                "name": str(bot_guild.get("name") or oauth_guild.get("name") or "Unknown server"),
+                "icon_url": bot_guild.get("icon_url") or oauth_guild.get("icon_url"),
+                "messages": messages,
+                "images": images,
+                "voice_seconds": voice_seconds,
+                "voice_hours": round(voice_seconds / 3_600, 1),
+            }
+        )
+    server_rows.sort(key=lambda row: (int(row["messages"]), int(row["images"]), int(row["voice_seconds"])), reverse=True)
+    most_active = server_rows[0] if server_rows and int(server_rows[0]["messages"]) > 0 else None
+    return {
+        "user": user,
+        "stats": {
+            "messages": int(totals.get("messages") or 0),
+            "images": int(totals.get("images") or 0),
+            "voice_seconds": int(totals.get("voice_seconds") or 0),
+            "voice_hours": round(int(totals.get("voice_seconds") or 0) / 3_600, 1),
+            "server_count": len(guild_ids),
+        },
+        "most_active_server": most_active,
+        "servers": server_rows,
+    }
+
+
 @app.post("/logout")
 async def logout(request: Request):
     session_id = request.session.get("oauth_session_id")
@@ -1265,7 +1327,7 @@ async def manage_guild(guild_id: str, request: Request) -> dict[str, object]:
     """Return management data for the authenticated guild owner/admin only.
 
     The dashboard portal is deliberately separate from the member-facing
-    Music portal.  Support-role staff can still use the Discord ticket
+    Profile portal. Support-role staff can still use the Discord ticket
     controls, but they must not enter the administrative dashboard.
     """
     user, bot_guild = await verified_guild_manager(guild_id, request)
@@ -1291,6 +1353,13 @@ async def manage_guild(guild_id: str, request: Request) -> dict[str, object]:
             "usage": "/profile <member>", "details": "Open a member summary with their ID, join date, roles, and profile information.",
             "options": ["Search by username or display name.", "Choose a member from the server list."],
             "requirements": "Requires a server member to be selected.",
+        },
+        {
+            "name": "show_level", "label": "/show level", "category": "General",
+            "description": "Show a styled level card for a member.",
+            "usage": "/show level [member]", "details": "Generate a shareable image with the current level, next-level progress, and activity ranks.",
+            "options": ["Member is optional; when omitted, your own card is shown.", "Leveling must be enabled in this server."],
+            "requirements": "Available in any text channel with Attach Files permission.",
         },
         {
             "name": "kick", "label": "/kick", "category": "Moderation",
@@ -1343,17 +1412,17 @@ async def manage_guild(guild_id: str, request: Request) -> dict[str, object]:
         },
         {
             "name": "mute", "label": "/mute", "category": "Moderation",
-            "description": "Server-mute a member in voice.",
-            "usage": "/mute <member> [reason]", "details": "Apply a server voice mute to the selected member.",
-            "options": ["Target member is required.", "Reason is optional."],
-            "requirements": "Requires Mute Members permission and a member in voice.",
+            "description": "Prevent a member from sending messages in this chat.",
+            "usage": "/mute <member> [reason]", "details": "Apply a member-specific chat restriction in the selected text channel without changing their voice state.",
+            "options": ["Target member is required.", "The selected text channel is where the restriction is applied.", "Reason is optional."],
+            "requirements": "Requires Manage Channels permission.",
         },
         {
             "name": "unmute", "label": "/unmute", "category": "Moderation",
-            "description": "Remove a server voice mute.",
-            "usage": "/unmute <member> [reason]", "details": "Remove BirdBot's server mute while leaving the member in their current voice channel.",
-            "options": ["Choose a member who is currently server-muted in voice.", "Reason is optional and included in the moderation log."],
-            "requirements": "Requires Mute Members permission and a member in voice.",
+            "description": "Allow a member to send messages in this chat again.",
+            "usage": "/unmute <member> [reason]", "details": "Remove BirdBot's member-specific chat restriction from the selected text channel without changing their voice state.",
+            "options": ["Choose a member who is chat-muted in this channel.", "Reason is optional and included in the moderation log."],
+            "requirements": "Requires Manage Channels permission.",
         },
         {
             "name": "lock", "label": "/lock", "category": "Moderation",
@@ -1412,6 +1481,9 @@ async def manage_guild(guild_id: str, request: Request) -> dict[str, object]:
             "requirements": "BirdBot must be connected to your voice channel.",
         },
     ]
+    # Music playback remains available through Discord commands, but its
+    # website portal and command cards have been retired in favor of Profile.
+    commands = [command for command in commands if command.get("category") != "Music"]
     return {
         "guild": {**bot_guild, "activated": True},
         "profile": public_bot_profile(store.bot_profile(guild_id)),
@@ -1435,6 +1507,9 @@ async def manage_guild(guild_id: str, request: Request) -> dict[str, object]:
         "ai": store.ai_config(guild_id),
         # Expose readiness only; never return the provider key to the browser.
         "ai_available": bool(GROQ_API_KEY),
+        "level": store.level_config(guild_id),
+        "level_stats": store.level_stats(guild_id, limit=10),
+        "streak": store.streak_config(guild_id),
         "temp_vc": store.temp_vc_config(guild_id),
         "temp_vc_channels": store.temp_vc_channels(guild_id),
         # Placement rows contain no bot credentials. Live online/voice state
@@ -1579,6 +1654,131 @@ async def save_guild_log_config(guild_id: str, request: Request) -> dict[str, ob
     return {"log_config": config, "status": "saved"}
 
 
+@app.post("/api/guilds/{guild_id}/control/logs/create-channel")
+async def create_guild_log_channel(guild_id: str, request: Request) -> dict[str, str]:
+    """Queue creation of a dedicated Discord text channel for one log stream."""
+    user, _ = await verified_guild_manager(guild_id, request)
+    if not store.is_guild_activated(guild_id):
+        raise HTTPException(status_code=409, detail="Enable BirdBot for this server before changing log settings.")
+    try:
+        payload = await request.json()
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Choose a log type first.") from error
+    category = str(payload.get("category") or "").casefold() if isinstance(payload, dict) else ""
+    if category not in LOG_CATEGORIES:
+        raise HTTPException(status_code=400, detail="Choose a valid log type.")
+    request_id = store.queue_command(guild_id, "0", "create_log_channel", str(user["id"]), {"category": category})
+    return {"request_id": request_id, "status": "pending"}
+
+
+def parse_level_payload(payload: object, current: dict[str, object]) -> dict[str, object]:
+    """Validate the activity-level card without exposing any bot secrets."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid Level settings.")
+
+    def boolean(name: str, fallback: bool) -> bool:
+        value = payload.get(name, fallback)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and value in {0, 1}:
+            return bool(value)
+        if isinstance(value, str) and value.strip().casefold() in {"true", "false", "1", "0", "on", "off"}:
+            return value.strip().casefold() in {"true", "1", "on"}
+        raise HTTPException(status_code=400, detail=f"{name} must be true or false.")
+
+    style = str(payload.get("style", current.get("style") or "classic")).strip().casefold()
+    if style not in {"classic", "milestone", "activity", "streak"}:
+        raise HTTPException(status_code=400, detail="Choose one of the available leveling styles.")
+    language = str(payload.get("language", current.get("language") or "en")).strip().casefold()
+    if language not in {"en", "ar"}:
+        raise HTTPException(status_code=400, detail="Choose English or Arabic for level-up messages.")
+    channel_id = _dashboard_snowflake(payload.get("channel_id", current.get("channel_id")), allow_empty=True)
+    try:
+        xp_per_message = int(payload.get("xp_per_message", current.get("xp_per_message", 10)))
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail="Points per message must be a whole number.") from error
+    if not 1 <= xp_per_message <= 100:
+        raise HTTPException(status_code=400, detail="Points per message must be between 1 and 100.")
+    enabled = boolean("enabled", bool(current.get("enabled", False)))
+    if enabled and not channel_id:
+        raise HTTPException(status_code=400, detail="Choose a channel for level-up announcements.")
+    return {"enabled": enabled, "style": style, "language": language, "channel_id": channel_id, "xp_per_message": xp_per_message}
+
+
+@app.get("/api/guilds/{guild_id}/control/level")
+async def get_dashboard_level(guild_id: str, request: Request) -> dict[str, object]:
+    await verified_guild_manager(guild_id, request)
+    if not store.is_guild_activated(guild_id):
+        raise HTTPException(status_code=409, detail="Enable BirdBot for this server before managing Level.")
+    return {"level": store.level_config(guild_id), "level_stats": store.level_stats(guild_id, limit=10)}
+
+
+@app.post("/api/guilds/{guild_id}/control/level")
+async def save_dashboard_level(guild_id: str, request: Request) -> dict[str, object]:
+    user, _ = await verified_guild_manager(guild_id, request)
+    if not store.is_guild_activated(guild_id):
+        raise HTTPException(status_code=409, detail="Enable BirdBot for this server before changing Level settings.")
+    try:
+        payload = await request.json()
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid Level settings.") from error
+    current = store.level_config(guild_id)
+    normalized = parse_level_payload(payload, current)
+    channel_id = normalized.get("channel_id")
+    if channel_id and str(channel_id) not in {str(channel.get("id")) for channel in store.bot_text_channels(guild_id)}:
+        raise HTTPException(status_code=404, detail="BirdBot cannot access that level-up channel.")
+    config = store.save_level_config(guild_id, updated_by=str(user["id"]), **normalized)
+    return {"level": config, "level_stats": store.level_stats(guild_id, limit=10), "status": "saved"}
+
+
+def parse_streak_payload(payload: object, current: dict[str, object]) -> dict[str, object]:
+    """Validate the dedicated number-streak card settings."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid Streak settings.")
+    value = payload.get("enabled", bool(current.get("enabled", False)))
+    if isinstance(value, bool):
+        enabled = value
+    elif isinstance(value, int) and value in {0, 1}:
+        enabled = bool(value)
+    elif isinstance(value, str) and value.strip().casefold() in {"true", "false", "1", "0", "on", "off"}:
+        enabled = value.strip().casefold() in {"true", "1", "on"}
+    else:
+        raise HTTPException(status_code=400, detail="enabled must be true or false.")
+    channel_id = _dashboard_snowflake(payload.get("channel_id", current.get("channel_id")), allow_empty=True)
+    language = str(payload.get("language", current.get("language") or "en")).strip().casefold()
+    if language not in {"en", "ar"}:
+        raise HTTPException(status_code=400, detail="Choose English or Arabic for Streak messages.")
+    if enabled and not channel_id:
+        raise HTTPException(status_code=400, detail="Choose a channel for the Streak game.")
+    return {"enabled": enabled, "channel_id": channel_id, "language": language}
+
+
+@app.get("/api/guilds/{guild_id}/control/streak")
+async def get_dashboard_streak(guild_id: str, request: Request) -> dict[str, object]:
+    await verified_guild_manager(guild_id, request)
+    if not store.is_guild_activated(guild_id):
+        raise HTTPException(status_code=409, detail="Enable BirdBot for this server before managing Streak.")
+    return {"streak": store.streak_config(guild_id)}
+
+
+@app.post("/api/guilds/{guild_id}/control/streak")
+async def save_dashboard_streak(guild_id: str, request: Request) -> dict[str, object]:
+    user, _ = await verified_guild_manager(guild_id, request)
+    if not store.is_guild_activated(guild_id):
+        raise HTTPException(status_code=409, detail="Enable BirdBot for this server before changing Streak settings.")
+    try:
+        payload = await request.json()
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid Streak settings.") from error
+    current = store.streak_config(guild_id)
+    normalized = parse_streak_payload(payload, current)
+    channel_id = normalized.get("channel_id")
+    if channel_id and str(channel_id) not in {str(channel.get("id")) for channel in store.bot_text_channels(guild_id)}:
+        raise HTTPException(status_code=404, detail="BirdBot cannot access that Streak channel.")
+    config = store.save_streak_config(guild_id, updated_by=str(user["id"]), **normalized)
+    return {"streak": config, "status": "saved"}
+
+
 def spy_game_dashboard_config(guild_id: str | None = None) -> dict[str, object]:
     """Read the small, non-secret Spy Game branding/configuration manifest."""
     path = ROOT_DIR / "config" / "games" / "spy.config.json"
@@ -1590,7 +1790,7 @@ def spy_game_dashboard_config(guild_id: str | None = None) -> dict[str, object]:
         payload = {}
     # Keep local filesystem paths private while exposing browser-safe asset URLs.
     assets: dict[str, object] = {}
-    for key, fallback in (("bannerPath", "/assets/games/spy_banner.svg"), ("iconPath", "/assets/games/spy_icon.svg")):
+    for key, fallback in (("bannerPath", "/assets/games/spy_banner.svg"), ("iconPath", "/assets/games/spy_icon.svg?v=3")):
         raw = payload.get(key)
         if isinstance(raw, str) and raw.strip():
             relative = raw.replace("\\", "/").lstrip("./")
@@ -1734,7 +1934,7 @@ def roulette_game_dashboard_config(guild_id: str | None = None) -> dict[str, obj
         "name": str(payload.get("name") or "Roulette"),
         "theme": str(payload.get("theme") or "#000000"),
         "bannerPath": asset_url("bannerPath", "/assets/games/roulette_banner.png"),
-        "iconPath": asset_url("iconPath", "/assets/games/roulette_icon.svg"),
+        "iconPath": f"{asset_url('iconPath', '/assets/games/roulette_icon.svg')}?v=3",
         "minimumPlayers": minimum,
         "maximumPlayers": maximum,
         "enabled": enabled,
@@ -1755,6 +1955,16 @@ def guess_number_game_dashboard_config(guild_id: str | None = None) -> dict[str,
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
+
+    def asset_url(key: str, fallback: str) -> str:
+        raw = payload.get(key)
+        if not isinstance(raw, str) or not raw.strip():
+            return fallback
+        relative = raw.replace("\\", "/").lstrip("./")
+        local = ROOT_DIR / "website" / relative
+        if local.is_file() and relative.startswith(("games/", "assets/")):
+            return f"/assets/{relative.removeprefix('assets/')}"
+        return fallback
     minimum = 2
     maximum = 20
     number_minimum = 1
@@ -1784,8 +1994,8 @@ def guess_number_game_dashboard_config(guild_id: str | None = None) -> dict[str,
         "id": "guess-number",
         "name": str(payload.get("name") or "Guess the Number"),
         "theme": str(payload.get("theme") or "#1f2937"),
-        "bannerPath": "/assets/games/spy_banner.svg",
-        "iconPath": "/assets/games/spy_icon.svg",
+        "bannerPath": asset_url("bannerPath", "/assets/games/spy_banner.svg"),
+        "iconPath": f"{asset_url('iconPath', '/assets/games/guess_number_icon.svg')}?v=3",
         "minimumPlayers": minimum,
         "maximumPlayers": maximum,
         "numberMinimum": number_minimum,
@@ -3460,6 +3670,7 @@ async def get_dashboard_bot_settings(guild_id: str, request: Request) -> dict[st
         "auto_reacts": store.auto_reacts(guild_id),
         "automod": store.automod_config(guild_id),
         "ai": store.ai_config(guild_id),
+        "level": store.level_config(guild_id),
         "ai_available": bool(GROQ_API_KEY),
     }
 

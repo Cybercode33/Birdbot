@@ -17,6 +17,24 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+try:
+    from PIL import Image, ImageDraw, ImageFont, features as PILFeatures
+except ImportError:  # Pillow is optional at runtime; text fallback keeps the bot online.
+    Image = ImageDraw = ImageFont = None  # type: ignore[assignment]
+    PILFeatures = None  # type: ignore[assignment]
+
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display as bidi_display
+except ImportError:  # Optional locally; production installs these from requirements.txt.
+    arabic_reshaper = None  # type: ignore[assignment]
+    bidi_display = None  # type: ignore[assignment]
+
+try:
+    _PIL_HAS_RAQM = bool(PILFeatures and PILFeatures.check("raqm"))
+except (AttributeError, OSError, ValueError):
+    _PIL_HAS_RAQM = False
+
 from command_messages import command_message
 from discord_members import resolve_guild_member
 from ai_assistant import AIAssistant
@@ -56,8 +74,8 @@ LOG_EVENT_LABELS = {
     "moderation_unwarning": "Warning removed",
     "moderation_timeout": "Member timed out",
     "moderation_untimeout": "Member timeout removed",
-    "moderation_mute": "Member server-muted",
-    "moderation_unmute": "Member server mute removed",
+    "moderation_mute": "Member chat-muted",
+    "moderation_unmute": "Member chat mute removed",
     "moderation_automod": "Automod action",
 }
 LOG_EVENT_ACTIONS = {
@@ -87,8 +105,8 @@ LOG_EVENT_ACTIONS = {
     "moderation_unwarning": "removed a warning from",
     "moderation_timeout": "timed out",
     "moderation_untimeout": "removed the timeout from",
-    "moderation_mute": "server-muted",
-    "moderation_unmute": "removed the server mute from",
+    "moderation_mute": "chat-muted",
+    "moderation_unmute": "removed the chat mute from",
     "moderation_automod": "applied an Automod rule to",
 }
 _LOG_MODERATION_EVENTS = {
@@ -103,6 +121,57 @@ _LOG_USER_EVENTS = {
 }
 _LOG_CHANNEL_EVENTS = {"channel_create", "channel_update", "channel_delete"}
 _LOG_ROLE_EVENTS = {"role_create", "role_update", "role_delete"}
+
+
+def _level_font(size: int, *, bold: bool = False):
+    """Load a common system font for the generated level card."""
+    if ImageFont is None:
+        return None
+    if bold:
+        candidates = (
+            "C:/Windows/Fonts/segoeuib.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        )
+    else:
+        candidates = (
+            "C:/Windows/Fonts/segoeui.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        )
+    for filename in candidates:
+        try:
+            return ImageFont.truetype(filename, size=size)
+        except (OSError, ValueError):
+            continue
+    return ImageFont.load_default()
+
+
+def _shape_level_text(value: object, language: str = "en") -> str:
+    """Shape Arabic glyphs before Pillow draws them left-to-right.
+
+    Pillow can draw Arabic only when built with libraqm; reshaping plus the
+    Unicode bidi algorithm keeps cards correct on hosts without that optional
+    native dependency as well.
+    """
+    text = str(value or "")
+    # Shape Arabic names and server titles regardless of the selected card
+    # language. A server can keep English labels while still using Arabic
+    # member names, and those names must not be rendered backwards.
+    if not re.search(r"[\u0600-\u06ff]", text) or not text:
+        return text
+    # Pillow/libraqm performs shaping and bidi layout when ``direction`` is
+    # supplied at draw time. Pre-reversing here would cause a double reversal.
+    if _PIL_HAS_RAQM:
+        return text
+    if arabic_reshaper is not None and bidi_display is not None:
+        try:
+            return bidi_display(arabic_reshaper.reshape(text))
+        except (TypeError, ValueError):
+            pass
+    return text
 
 # Discord limits communication timeouts to 28 days.  Keep one parser for
 # prefix, slash, and dashboard actions so users can choose a duration in the
@@ -985,6 +1054,7 @@ class General(commands.Cog):
         self._spam_windows: dict[tuple[int, int], deque[float]] = {}
         self._raid_windows: dict[int, deque[float]] = {}
         self._automod_in_flight: set[tuple[int, int]] = set()
+        self._streak_locks: dict[int, asyncio.Lock] = {}
         self._ai = AIAssistant()
         self._ai_tasks: set[asyncio.Task[None]] = set()
         self._ai_unavailable_logged = False
@@ -1323,17 +1393,160 @@ class General(commands.Cog):
                 # command processing or activity logging.
                 continue
 
+    async def apply_streak(self, message: discord.Message) -> bool:
+        """Handle one configured number-streak channel.
+
+        Returning ``True`` means the channel is owned by Streak and the normal
+        AI/auto-react pipeline should not process this game message. Invalid
+        text is removed when permissions allow; an incorrect number or a
+        repeated turn resets the sequence and announces the reset bilingually.
+        """
+        if not message.guild or message.author.bot:
+            return False
+        config = store.streak_config(str(message.guild.id))
+        if not config.get("enabled") or str(config.get("channel_id") or "") != str(getattr(message.channel, "id", "")):
+            return False
+        language = "ar" if str(config.get("language") or "en").casefold() == "ar" else "en"
+
+        content = str(message.content or "").strip()
+        if not re.fullmatch(r"[0-9]+", content):
+            try:
+                await message.delete(reason="Streak accepts whole positive numbers only")
+            except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                pass
+            try:
+                warning = (
+                    f"{message.author.mention} أرسل رقماً صحيحاً موجباً فقط."
+                    if language == "ar"
+                    else f"{message.author.mention} Please send a whole positive number only."
+                )
+                await message.channel.send(
+                    warning,
+                    delete_after=8,
+                    allowed_mentions=discord.AllowedMentions(users=[message.author], roles=False, everyone=False),
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            return True
+        try:
+            number = int(content)
+        except (TypeError, ValueError):
+            return True
+
+        lock = self._streak_locks.setdefault(int(message.guild.id), asyncio.Lock())
+        async with lock:
+            result = store.record_streak_number(
+                str(message.guild.id),
+                str(message.channel.id),
+                str(message.author.id),
+                number,
+            )
+        if result is None:
+            return False
+        language = "ar" if result.get("language") == "ar" else "en"
+        if result.get("status") == "accepted":
+            try:
+                await message.add_reaction("✅")
+            except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                pass
+            try:
+                accepted = (
+                    f"✅ {message.author.mention} أكمل التسلسل بالرقم **{result['expected']}**. "
+                    f"الرقم التالي: **{result['next_number']}**."
+                    if language == "ar"
+                    else f"✅ {message.author.mention} continued the streak with **{result['expected']}**. "
+                    f"Next number: **{result['next_number']}**."
+                )
+                await message.channel.send(
+                    accepted,
+                    allowed_mentions=discord.AllowedMentions(users=[message.author], roles=False, everyone=False),
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            return True
+
+        try:
+            await message.add_reaction("❌")
+        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+            pass
+        try:
+            broken = (
+                f"🚫 {message.author.mention} كسر التسلسل. سيُعاد العد إلى **1**."
+                if language == "ar"
+                else f"🚫 {message.author.mention} broke the streak. The count resets to **1**."
+            )
+            await message.channel.send(
+                broken,
+                allowed_mentions=discord.AllowedMentions(users=[message.author], roles=False, everyone=False),
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        return True
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         if not message.guild or self._is_log_delivery_message(message):
             return
-        automod_triggered = await self.apply_automod(message)
-        if not automod_triggered:
+        streak_handled = await self.apply_streak(message)
+        automod_triggered = False if streak_handled else await self.apply_automod(message)
+        if not automod_triggered and not streak_handled:
             await self.apply_auto_reacts(message)
         content = str(message.content or "").strip() or "[No text]"
         if message.attachments:
             content += "\nAttachments: " + ", ".join(attachment.filename for attachment in message.attachments[:8])
         await self.write_log(message.guild, "message_sent", actor=message.author, channel=message.channel, details=content[:4_000])
+        if not message.author.bot:
+            image_extensions = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".avif"}
+            image_count = sum(
+                1
+                for attachment in message.attachments
+                if str(getattr(attachment, "content_type", "") or "").casefold().startswith("image/")
+                or Path(str(getattr(attachment, "filename", "") or "")).suffix.casefold() in image_extensions
+            )
+            store.record_profile_message(
+                str(message.guild.id),
+                str(message.author.id),
+                str(getattr(message.author, "display_name", message.author.name)),
+                str(getattr(message.author, "name", message.author)),
+                str(getattr(getattr(message.author, "display_avatar", None), "url", "")) or None,
+                image_count,
+            )
+        if streak_handled:
+            return
+        # Leveling is deliberately handled in the same gateway listener as
+        # message activity so every human message counts, including messages
+        # sent without a command prefix.  The store keeps daily/weekly counts
+        # and returns a transition only when a member actually levels up.
+        if not message.author.bot:
+            level_config = store.level_config(str(message.guild.id))
+            if level_config.get("enabled"):
+                progress = store.record_level_message(
+                    str(message.guild.id),
+                    str(message.author.id),
+                    str(getattr(message.author, "display_name", message.author.name)),
+                    str(getattr(message.author, "name", message.author)),
+                    str(getattr(getattr(message.author, "display_avatar", None), "url", "")) or None,
+                )
+                if progress and progress.get("leveled_up"):
+                    destination = message.channel
+                    configured_channel = str(level_config.get("channel_id") or "")
+                    if configured_channel.isdigit():
+                        candidate = message.guild.get_channel(int(configured_channel))
+                        if isinstance(candidate, discord.TextChannel):
+                            destination = candidate
+                    old_level = int(progress.get("previous_level") or 1)
+                    new_level = int(progress.get("level") or old_level)
+                    if str(level_config.get("language") or "en") == "ar":
+                        announcement = f"{message.author.mention} ارتقى من المستوى {old_level} إلى المستوى {new_level} 🎉"
+                    else:
+                        announcement = f"{message.author.mention} has leveled up from Level {old_level} to Level {new_level} 🎉"
+                    try:
+                        await destination.send(
+                            announcement,
+                            allowed_mentions=discord.AllowedMentions(users=[message.author], roles=False, everyone=False),
+                        )
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
         self._schedule_ai_reply(message)
 
     @commands.Cog.listener()
@@ -1617,6 +1830,18 @@ class General(commands.Cog):
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
         before_channel = before.channel
         after_channel = after.channel
+        if not member.bot:
+            joined = before_channel is None and after_channel is not None
+            left = before_channel is not None and after_channel is None
+            if joined or left:
+                store.record_profile_voice_state(
+                    str(member.guild.id),
+                    str(member.id),
+                    str(getattr(member, "display_name", member.name)),
+                    str(getattr(member, "name", member)),
+                    str(getattr(getattr(member, "display_avatar", None), "url", "")) or None,
+                    connected=joined,
+                )
         if before_channel is None and after_channel is not None:
             await self.write_log(member.guild, "voice_join", actor=member, target=member, channel=after_channel, details=f"Joined {after_channel.name}.")
         elif before_channel is not None and after_channel is None:
@@ -2099,7 +2324,7 @@ class General(commands.Cog):
         command_name = str(ctx.command.qualified_name if ctx.command else "").replace(" ", "_")
         if command_name == "show_warnings":
             command_name = "show_warning"
-        if command_name in {"ping", "server", "profile", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "untimeout", "mute", "unmute", "lock", "unlock", "delete"}:
+        if command_name in {"ping", "server", "profile", "show_level", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "untimeout", "mute", "unmute", "lock", "unlock", "delete"}:
             return bool(store.command_config(str(ctx.guild.id), command_name).get("enabled", True))
         return True
 
@@ -2111,7 +2336,7 @@ class General(commands.Cog):
         command_name = str(getattr(command, "qualified_name", "") or getattr(command, "name", "")).replace(" ", "_")
         if command_name == "show_warnings":
             command_name = "show_warning"
-        if command_name in {"ping", "server", "profile", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "untimeout", "mute", "unmute", "lock", "unlock", "delete"} and not store.command_config(str(interaction.guild.id), command_name).get("enabled", True):
+        if command_name in {"ping", "server", "profile", "show_level", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "untimeout", "mute", "unmute", "lock", "unlock", "delete"} and not store.command_config(str(interaction.guild.id), command_name).get("enabled", True):
             language = str(store.command_config(str(interaction.guild.id), command_name).get("language") or "en")
             await interaction.response.send_message(command_message("common", language, "disabled"), ephemeral=True)
             return False
@@ -2612,6 +2837,42 @@ class General(commands.Cog):
         except Exception as error:
             print(f"Role snapshot refresh failed for {guild.id}: {error}")
 
+    @staticmethod
+    def _chat_mute_active(channel: discord.TextChannel, member: discord.Member) -> bool:
+        """Return whether BirdBot has an explicit chat-send deny for member."""
+        overwrite = channel.overwrites_for(member)
+        return bool(
+            overwrite.send_messages is False
+            or getattr(overwrite, "send_messages_in_threads", None) is False
+        )
+
+    async def _set_chat_mute(
+        self,
+        channel: discord.TextChannel,
+        member: discord.Member,
+        muted: bool,
+        reason: str,
+        language: str = "en",
+    ) -> None:
+        """Toggle a member-specific text permission without touching voice state.
+
+        Discord's server mute flag is voice-only.  A member overwrite on the
+        text channel is the least-surprising way to implement ``/mute`` as a
+        chat mute while leaving the member able to join and speak in voice.
+        """
+        bot_member = channel.guild.me
+        if not bot_member:
+            raise ValueError("BirdBot is not ready in this server.")
+        if not bot_member.guild_permissions.manage_channels:
+            raise ValueError(command_message("mute", language, "dashboard_permission"))
+        overwrite = channel.overwrites_for(member)
+        overwrite.send_messages = False if muted else None
+        # Keep thread replies consistent with the parent chat when supported
+        # by the installed discord.py version.
+        if hasattr(overwrite, "send_messages_in_threads"):
+            overwrite.send_messages_in_threads = False if muted else None
+        await channel.set_permissions(member, overwrite=overwrite, reason=reason)
+
     async def _set_channel_lock(self, channel: discord.TextChannel, locked: bool, language: str = "en") -> None:
         bot_member = channel.guild.me
         if not bot_member:
@@ -2643,8 +2904,188 @@ class General(commands.Cog):
             raise ValueError(command_message("delete", language, "failed")) from error
         return len(deleted)
 
+    async def _build_level_card(self, guild: discord.Guild, member: discord.Member, stats: dict[str, object]) -> bytes | None:
+        """Render a compact, high-contrast level profile for Discord previews."""
+        if Image is None or ImageDraw is None:
+            return None
+        width, height = 1200, 630
+        background = Image.new("RGB", (width, height), "#0a1324")
+        pixels = background.load()
+        top, bottom = (10, 19, 36), (22, 37, 68)
+        for y in range(height):
+            ratio = y / max(1, height - 1)
+            colour = tuple(int(top[index] * (1 - ratio) + bottom[index] * ratio) for index in range(3))
+            for x in range(width):
+                pixels[x, y] = colour
+        draw = ImageDraw.Draw(background)
+        panel, card, border = (30, 47, 79), (19, 32, 56), (54, 76, 116)
+        accent, accent_soft = (129, 140, 248), (165, 180, 252)
+        primary, secondary = (239, 244, 255), (164, 180, 207)
+        language = "ar" if str(stats.get("language") or "en").casefold() == "ar" else "en"
+
+        draw.ellipse((950, -180, 1350, 220), fill=(34, 56, 97))
+        draw.ellipse((-170, 470, 170, 790), fill=(24, 49, 77))
+        draw.rounded_rectangle((24, 24, width - 24, height - 24), radius=30, fill=panel, outline=border, width=2)
+        draw.rounded_rectangle((50, 50, 306, height - 50), radius=24, fill=card, outline=border, width=2)
+        draw.rounded_rectangle((324, 50, width - 50, height - 50), radius=24, fill=card, outline=border, width=2)
+
+        def write(position: tuple[int, int], value: object, font: object, fill: object, **kwargs: object) -> None:
+            """Draw text with exactly one Arabic shaping/layout path."""
+            text = _shape_level_text(value, language)
+            contains_arabic = bool(re.search(r"[\u0600-\u06ff]", text))
+            if contains_arabic and _PIL_HAS_RAQM:
+                try:
+                    draw.text(position, text, font=font, fill=fill, direction="rtl", language="ar", **kwargs)
+                    return
+                except (TypeError, ValueError):
+                    pass
+            if contains_arabic and (arabic_reshaper is None or bidi_display is None):
+                try:
+                    draw.text(position, text, font=font, fill=fill, direction="rtl", language="ar", **kwargs)
+                    return
+                except (TypeError, ValueError):
+                    pass
+            draw.text(position, text, font=font, fill=fill, **kwargs)
+
+        labels = {
+            "profile": "بطاقة المستوى" if language == "ar" else "LEVEL PROFILE",
+            "community": "مجتمع BirdBot" if language == "ar" else "BIRDBOT • COMMUNITY",
+            "title": "ملف المستوى" if language == "ar" else "Level profile",
+            "subtitle": "تقدم النشاط وترتيب المجتمع" if language == "ar" else "Activity progress and community rankings",
+            "level": "المستوى" if language == "ar" else "LEVEL",
+            "remaining": "متبقي للوصول إلى المستوى" if language == "ar" else "remaining to Level",
+            "top": "أعلى المستويات" if language == "ar" else "Top levels",
+            "today": "نشاط اليوم" if language == "ar" else "Active today",
+            "weekly": "نشاط الأسبوع" if language == "ar" else "Active weekly",
+            "messages": "الرسائل" if language == "ar" else "All-time messages",
+            "style": "نمط التقدم" if language == "ar" else "Progress style",
+            "leaderboard": "ترتيب الخادم" if language == "ar" else "server leaderboard",
+            "activity": "النشاط المسجل" if language == "ar" else "activity recorded",
+            "configured": "إعداد الخادم" if language == "ar" else "configured by server",
+            "message": "رسائل" if language == "ar" else "messages",
+            "xp": "خبرة" if language == "ar" else "XP",
+        }
+
+        # Sidebar: a smaller avatar and tighter vertical rhythm leave room for
+        # names, labels, and the server identity without a large dead zone.
+        avatar_size = 140
+        avatar_position = (108, 84)
+        draw.ellipse((*avatar_position, avatar_position[0] + avatar_size, avatar_position[1] + avatar_size), fill=(44, 62, 96), outline=accent, width=3)
+        try:
+            raw_avatar = await member.display_avatar.read()
+            avatar = Image.open(io.BytesIO(raw_avatar)).convert("RGBA")
+            side = min(avatar.size)
+            left = (avatar.width - side) // 2
+            top_crop = (avatar.height - side) // 2
+            avatar = avatar.crop((left, top_crop, left + side, top_crop + side)).resize((avatar_size, avatar_size), getattr(Image, "Resampling", Image).LANCZOS)
+            mask = Image.new("L", (avatar_size, avatar_size), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, avatar_size - 1, avatar_size - 1), fill=255)
+            background.paste(avatar, avatar_position, mask)
+        except (discord.HTTPException, OSError, ValueError, AttributeError):
+            write((178, 154), "?", _level_font(60, bold=True), accent_soft, anchor="mm")
+
+        name = str(getattr(member, "display_name", None) or getattr(member, "name", None) or stats.get("display_name") or "Member")
+        if len(name) > 18:
+            name = f"{name[:17]}…"
+        username = str(getattr(member, "name", name))
+        if len(username) > 23:
+            username = f"{username[:22]}…"
+        write((78, 252), name, _level_font(25, bold=True), primary)
+        write((78, 286), f"@{username}", _level_font(15), secondary)
+        write((78, 356), labels["profile"], _level_font(13, bold=True), accent_soft)
+        write((78, 386), str(guild.name)[:29], _level_font(15), secondary)
+        write((78, 530), labels["community"], _level_font(12, bold=True), (125, 145, 182))
+
+        # Main panel: title, progress, then two compact rows of stat cards.
+        write((352, 82), labels["title"], _level_font(29, bold=True), primary)
+        write((352, 122), labels["subtitle"], _level_font(15), secondary)
+        level = int(stats.get("level") or 1)
+        progress_current = int(stats.get("progress_current") or 0)
+        progress_required = max(1, int(stats.get("progress_required") or 1))
+        progress_remaining = int(stats.get("progress_remaining") or 0)
+        progress_unit = labels["xp"] if str(stats.get("progress_unit") or "XP") == "XP" else labels["message"]
+        write((352, 166), f"{labels['level']} {level}", _level_font(17, bold=True), accent_soft)
+        write((width - 82, 166), f"{progress_current} / {progress_required} {progress_unit}", _level_font(15, bold=True), primary, anchor="ra")
+        bar_left, bar_right = 352, width - 82
+        draw.rounded_rectangle((bar_left, 194, bar_right, 214), radius=10, fill=(10, 20, 37))
+        progress_width = int((bar_right - bar_left) * min(1, progress_current / progress_required))
+        if progress_width:
+            draw.rounded_rectangle((bar_left, 194, bar_left + progress_width, 214), radius=10, fill=accent)
+        write((352, 226), f"{progress_remaining} {progress_unit} {labels['remaining']} {level + 1}", _level_font(13), secondary)
+
+        def stat_card(x: int, y: int, w: int, title: str, value: str, detail: str = "") -> None:
+            draw.rounded_rectangle((x, y, x + w, y + 106), radius=16, fill=(25, 41, 70), outline=border, width=1)
+            write((x + 16, y + 15), title.upper() if language != "ar" else title, _level_font(11, bold=True), secondary)
+            write((x + 16, y + 43), value, _level_font(23, bold=True), primary)
+            if detail:
+                write((x + 16, y + 78), detail, _level_font(12), accent_soft)
+
+        def rank_label(value: object) -> str:
+            return f"#{int(value)}" if value is not None else "—"
+
+        stat_card(352, 274, 244, labels["top"], rank_label(stats.get("top_levels_rank")), labels["leaderboard"])
+        stat_card(614, 274, 244, labels["today"], rank_label(stats.get("daily_rank")), f"{int(stats.get('daily_messages') or 0)} {labels['message']}")
+        stat_card(876, 274, 244, labels["weekly"], rank_label(stats.get("weekly_rank")), f"{int(stats.get('weekly_messages') or 0)} {labels['message']}")
+        stat_card(352, 396, 372, labels["messages"], f"{int(stats.get('message_count') or 0):,}", labels["activity"])
+        style_label = str(stats.get("style") or "classic").replace("_", " ").title()
+        if language == "ar":
+            style_label = {"Classic": "كلاسيكي", "Milestone": "مراحل الرسائل", "Activity": "سلم النشاط", "Streak": "الاستمرارية"}.get(style_label, style_label)
+        stat_card(742, 396, 378, labels["style"], style_label, labels["configured"])
+
+        draw.line((352, 526, width - 82, 526), fill=(45, 65, 101), width=1)
+        write((352, 548), "BirdBot • Level profile" if language != "ar" else "BirdBot • ملف المستوى", _level_font(12, bold=True), (125, 145, 182))
+
+        output = io.BytesIO()
+        background.save(output, format="PNG", optimize=True)
+        return output.getvalue()
+
+    @staticmethod
+    def _level_fallback_text(member: discord.Member, stats: dict[str, object], language: str = "en") -> str:
+        level = int(stats.get("level") or 1)
+        current = int(stats.get("progress_current") or 0)
+        required = int(stats.get("progress_required") or 1)
+        remaining = int(stats.get("progress_remaining") or 0)
+        if language == "ar":
+            unit = "خبرة" if str(stats.get("progress_unit") or "XP") == "XP" else "رسائل"
+            top = f"#{stats['top_levels_rank']}" if stats.get("top_levels_rank") else "—"
+            daily = f"#{stats['daily_rank']}" if stats.get("daily_rank") else "—"
+            weekly = f"#{stats['weekly_rank']}" if stats.get("weekly_rank") else "—"
+            return "\n".join([
+                f"{member.mention} — المستوى {level}",
+                f"التقدم: {current}/{required} {unit} (متبقي {remaining})",
+                f"أعلى المستويات: {top}",
+                f"الأكثر نشاطاً اليوم: {daily}",
+                f"الأكثر نشاطاً هذا الأسبوع: {weekly}",
+            ])
+        lines = [
+            f"{member.mention} — Level {level}",
+            f"Progress: {current}/{required} {stats.get('progress_unit') or 'XP'} ({remaining} remaining)",
+            f"Top Levels: #{stats['top_levels_rank']}" if stats.get("top_levels_rank") else "Top Levels: —",
+            f"Most Active Today: #{stats['daily_rank']}" if stats.get("daily_rank") else "Most Active Today: —",
+            f"Most Active Weekly: #{stats['weekly_rank']}" if stats.get("weekly_rank") else "Most Active Weekly: —",
+        ]
+        return "\n".join(lines)
+
+    async def _send_level_card(self, channel: discord.abc.Messageable, guild: discord.Guild, member: discord.Member) -> None:
+        config = store.level_config(str(guild.id))
+        language = str(config.get("language") or "en")
+        if not config.get("enabled"):
+            message = "نظام المستويات غير مفعّل في هذا الخادم." if language == "ar" else "The leveling system is not enabled in this server."
+            await channel.send(message)
+            return
+        stats = store.level_member_stats(str(guild.id), str(member.id))
+        card = await self._build_level_card(guild, member, stats)
+        if card is None:
+            await channel.send(self._level_fallback_text(member, stats, language), allowed_mentions=discord.AllowedMentions(users=[member]))
+            return
+        await channel.send(
+            content=f"{member.mention} · {'المستوى' if language == 'ar' else 'Level'} {stats.get('level', 1)}",
+            file=discord.File(io.BytesIO(card), filename="level-card.png"),
+            allowed_mentions=discord.AllowedMentions(users=[member]),
+        )
+
     async def run_dashboard_command(self, guild: discord.Guild, channel: discord.TextChannel, name: str, requested_by: str, payload: dict[str, Any]) -> None:
-        if name in {"ping", "server", "profile", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "untimeout", "mute", "unmute", "lock", "unlock", "delete"} and not store.command_config(str(guild.id), name).get("enabled", True):
+        if name in {"ping", "server", "profile", "show_level", "kick", "ban", "warning", "unwarning", "show_warning", "timeout", "untimeout", "mute", "unmute", "lock", "unlock", "delete"} and not store.command_config(str(guild.id), name).get("enabled", True):
             raise ValueError("That command is disabled for this server. Enable it from the website Commands tab first.")
         bot_member = guild.me
         if not bot_member:
@@ -2660,6 +3101,8 @@ class General(commands.Cog):
         )
         if not channel_permissions.view_channel or (requires_send_messages and not channel_permissions.send_messages):
             raise ValueError("BirdBot cannot access that channel. Grant it View Channel and Send Messages permissions.")
+        if name == "show_level" and not channel_permissions.attach_files:
+            raise ValueError("BirdBot needs Attach Files permission in that channel to send the level card.")
         if name in {"server", "profile", "ticket_post"} and not channel_permissions.embed_links:
             raise ValueError("BirdBot needs Embed Links permission in that channel to send this panel.")
         language = str(store.command_config(str(guild.id), name).get("language") or "en")
@@ -2766,6 +3209,13 @@ class General(commands.Cog):
                 raise ValueError("That member could not be loaded from Discord. Search again and retry in a moment.")
             await channel.send(embed=profile_embed(member, language))
             return
+        if name == "show_level":
+            member_id = str(payload.get("member_id") or requested_by)
+            member = await resolve_guild_member(guild, member_id)
+            if not member:
+                raise ValueError("That member could not be loaded from Discord. Search again and retry in a moment.")
+            await self._send_level_card(channel, guild, member)
+            return
         if name == "timeout":
             if not bot_member.guild_permissions.moderate_members:
                 raise ValueError(command_message("timeout", language, "dashboard_permission"))
@@ -2830,7 +3280,7 @@ class General(commands.Cog):
                 await channel.send(command_message("untimeout", language, "success", member=member.mention, reason=display_reason), allowed_mentions=discord.AllowedMentions(users=[member]))
             return
         if name == "mute":
-            if not bot_member.guild_permissions.mute_members:
+            if not bot_member.guild_permissions.manage_channels:
                 raise ValueError(command_message("mute", language, "dashboard_permission"))
             member = await resolve_guild_member(guild, str(payload.get("member_id") or ""))
             if not member:
@@ -2838,26 +3288,24 @@ class General(commands.Cog):
             problem = self.moderation_problem(guild, member)
             if problem:
                 raise ValueError(problem)
-            if not member.voice or not member.voice.channel:
-                raise ValueError(command_message("mute", language, "not_in_voice"))
             supplied_reason = str(payload.get("reason") or "").strip()
             reason = (supplied_reason or f"Dashboard action by {requested_by}")[:512]
             display_reason = supplied_reason[:512] or command_message("mute", language, "no_reason")
             moderator = await resolve_guild_member(guild, str(requested_by), attempts=1, timeout_seconds=4)
-            await member.edit(mute=True, reason=reason)
+            await self._set_chat_mute(channel, member, True, reason, language)
             await self.write_log(
                 guild,
                 "moderation_mute",
                 actor=moderator,
                 target=member,
-                channel=member.voice.channel if member.voice else None,
+                channel=channel,
                 details=f"Reason: {display_reason}",
             )
             if not payload.get("silent"):
                 await channel.send(command_message("mute", language, "success", member=member.mention), allowed_mentions=discord.AllowedMentions(users=[member]))
             return
         if name == "unmute":
-            if not bot_member.guild_permissions.mute_members:
+            if not bot_member.guild_permissions.manage_channels:
                 raise ValueError(command_message("unmute", language, "dashboard_permission"))
             member = await resolve_guild_member(guild, str(payload.get("member_id") or ""))
             if not member:
@@ -2865,22 +3313,19 @@ class General(commands.Cog):
             problem = self.moderation_problem(guild, member)
             if problem:
                 raise ValueError(problem)
-            if not member.voice or not member.voice.channel:
-                raise ValueError(command_message("unmute", language, "not_in_voice"))
-            if not member.voice.mute:
+            if not self._chat_mute_active(channel, member):
                 raise ValueError(command_message("unmute", language, "not_muted", member=member.mention))
             supplied_reason = str(payload.get("reason") or "").strip()
             reason = (supplied_reason or f"Dashboard action by {requested_by}")[:512]
             display_reason = supplied_reason[:512] or command_message("unmute", language, "no_reason")
             moderator = await resolve_guild_member(guild, str(requested_by), attempts=1, timeout_seconds=4)
-            voice_channel = member.voice.channel
-            await member.edit(mute=False, reason=reason)
+            await self._set_chat_mute(channel, member, False, reason, language)
             await self.write_log(
                 guild,
                 "moderation_unmute",
                 actor=moderator,
                 target=member,
-                channel=voice_channel,
+                channel=channel,
                 details=f"Reason: {display_reason}",
             )
             if not payload.get("silent"):
@@ -3091,7 +3536,15 @@ class General(commands.Cog):
     @commands.group(name="show", invoke_without_command=True)
     async def show_prefix(self, ctx: commands.Context[commands.Bot]) -> None:
         prefix = str(store.command_settings(str(ctx.guild.id)).get("prefix") or "!") if ctx.guild else "!"
-        await ctx.send(f"Use `{prefix}show warning @member` to view a member's active warnings.")
+        await ctx.send(f"Use `{prefix}show warning @member` for warnings or `{prefix}show level` for a level card.")
+
+    @show_prefix.command(name="level", aliases=("levels",))
+    async def show_level_prefix(self, ctx: commands.Context[commands.Bot], member: discord.Member | None = None) -> None:
+        if not ctx.guild:
+            await ctx.send("This command can only be used in a server.")
+            return
+        target = member or ctx.author
+        await self._send_level_card(ctx.channel, ctx.guild, target)
 
     @show_prefix.command(name="warning", aliases=("warnings",))
     @commands.has_guild_permissions(moderate_members=True)
@@ -3115,6 +3568,33 @@ class General(commands.Cog):
             return
         warnings = store.warnings_for_member(str(interaction.guild.id), str(user.id))  # type: ignore[union-attr]
         await interaction.followup.send(embed=self._warning_embed(user, warnings, language), ephemeral=True)
+
+    @show_group.command(name="level", description="Show a styled level card for a member.")
+    @app_commands.describe(user="Member whose level card should be displayed (defaults to you)")
+    async def slash_show_level(self, interaction: discord.Interaction, user: discord.Member | None = None) -> None:
+        if not await self.active_interaction(interaction):
+            return
+        if not interaction.guild:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        target = user or interaction.user
+        config = store.level_config(str(interaction.guild.id))
+        language = str(config.get("language") or "en")
+        if not config.get("enabled"):
+            message = "نظام المستويات غير مفعّل في هذا الخادم." if language == "ar" else "The leveling system is not enabled in this server."
+            await interaction.followup.send(message)
+            return
+        stats = store.level_member_stats(str(interaction.guild.id), str(target.id))
+        card = await self._build_level_card(interaction.guild, target, stats)
+        if card is None:
+            await interaction.followup.send(self._level_fallback_text(target, stats, language), allowed_mentions=discord.AllowedMentions(users=[target]))
+            return
+        await interaction.followup.send(
+            content=f"{target.mention} · {'المستوى' if language == 'ar' else 'Level'} {stats.get('level', 1)}",
+            file=discord.File(io.BytesIO(card), filename="level-card.png"),
+            allowed_mentions=discord.AllowedMentions(users=[target]),
+        )
 
     @show_group.command(name="warnings", description="Show a member's active warnings.")
     @app_commands.default_permissions(moderate_members=True)
@@ -3304,7 +3784,7 @@ class General(commands.Cog):
         await ctx.send(command_message("untimeout", language, "success", member=member.mention, reason=display_reason), allowed_mentions=discord.AllowedMentions(users=[member]))
 
     @commands.command(name="mute")
-    @commands.has_guild_permissions(mute_members=True)
+    @commands.has_guild_permissions(manage_channels=True)
     async def mute(self, ctx: commands.Context[commands.Bot], member: discord.Member, *, reason: str | None = None) -> None:
         if not ctx.guild:
             return
@@ -3313,27 +3793,26 @@ class General(commands.Cog):
         if problem:
             await ctx.send(problem)
             return
-        if not member.voice or not member.voice.channel:
-            await ctx.send(command_message("mute", language, "not_in_voice"))
+        if not isinstance(ctx.channel, discord.TextChannel):
+            await ctx.send(command_message("mute", language, "invalid_channel"))
             return
-        if not ctx.guild.me or not ctx.guild.me.guild_permissions.mute_members:
+        if not ctx.guild.me or not ctx.guild.me.guild_permissions.manage_channels:
             await ctx.send(command_message("mute", language, "dashboard_permission"))
             return
-        voice_channel = member.voice.channel
         display_reason = str(reason or "").strip()[:512] or command_message("mute", language, "no_reason")
-        await member.edit(mute=True, reason=display_reason)
+        await self._set_chat_mute(ctx.channel, member, True, display_reason, language)
         await self.write_log(
             ctx.guild,
             "moderation_mute",
             actor=ctx.author,
             target=member,
-            channel=voice_channel,
+            channel=ctx.channel,
             details=f"Reason: {display_reason}",
         )
         await ctx.send(command_message("mute", language, "success", member=member.mention), allowed_mentions=discord.AllowedMentions(users=[member]))
 
     @commands.command(name="unmute")
-    @commands.has_guild_permissions(mute_members=True)
+    @commands.has_guild_permissions(manage_channels=True)
     async def unmute(self, ctx: commands.Context[commands.Bot], member: discord.Member, *, reason: str | None = None) -> None:
         if not ctx.guild:
             return
@@ -3342,19 +3821,18 @@ class General(commands.Cog):
         if problem:
             await ctx.send(problem)
             return
-        if not ctx.guild.me or not ctx.guild.me.guild_permissions.mute_members:
+        if not isinstance(ctx.channel, discord.TextChannel):
+            await ctx.send(command_message("unmute", language, "invalid_channel"))
+            return
+        if not ctx.guild.me or not ctx.guild.me.guild_permissions.manage_channels:
             await ctx.send(command_message("unmute", language, "dashboard_permission"))
             return
-        if not member.voice or not member.voice.channel:
-            await ctx.send(command_message("unmute", language, "not_in_voice"))
-            return
-        if not member.voice.mute:
+        if not self._chat_mute_active(ctx.channel, member):
             await ctx.send(command_message("unmute", language, "not_muted", member=member.mention))
             return
         display_reason = str(reason or "").strip()[:512] or command_message("unmute", language, "no_reason")
-        voice_channel = member.voice.channel
-        await member.edit(mute=False, reason=display_reason)
-        await self.write_log(ctx.guild, "moderation_unmute", actor=ctx.author, target=member, channel=voice_channel, details=f"Reason: {display_reason}")
+        await self._set_chat_mute(ctx.channel, member, False, display_reason, language)
+        await self.write_log(ctx.guild, "moderation_unmute", actor=ctx.author, target=member, channel=ctx.channel, details=f"Reason: {display_reason}")
         await ctx.send(command_message("unmute", language, "success", member=member.mention), allowed_mentions=discord.AllowedMentions(users=[member]))
 
     @commands.command(name="lock")
@@ -3497,9 +3975,9 @@ class General(commands.Cog):
         await self.write_log(interaction.guild, "moderation_untimeout", actor=interaction.user, target=user, channel=interaction.channel, details=f"Reason: {display_reason}")
         await interaction.followup.send(command_message("untimeout", language, "success", member=user.mention, reason=display_reason), ephemeral=True, allowed_mentions=discord.AllowedMentions(users=[user]))
 
-    @app_commands.command(name="mute", description="Server-mute a member in their current voice channel.")
-    @app_commands.default_permissions(mute_members=True)
-    @app_commands.describe(user="Member to server-mute", reason="Why the member is being muted")
+    @app_commands.command(name="mute", description="Prevent a member from sending messages in this chat.")
+    @app_commands.default_permissions(manage_channels=True)
+    @app_commands.describe(user="Member to mute in this chat", reason="Why the member is being chat-muted")
     async def slash_mute(self, interaction: discord.Interaction, user: discord.Member, reason: str | None = None) -> None:
         if not await self.active_interaction(interaction):
             return
@@ -3507,35 +3985,34 @@ class General(commands.Cog):
             return
         language = str(store.command_config(str(interaction.guild.id), "mute").get("language") or "en")
         await interaction.response.defer(ephemeral=True, thinking=True)
-        if not interaction.user.guild_permissions.mute_members:
+        if not interaction.user.guild_permissions.manage_channels:
             await interaction.followup.send(command_message("mute", language, "permission"), ephemeral=True)
             return
         problem = self.moderation_problem(interaction.guild, user)
         if problem:
             await interaction.followup.send(problem, ephemeral=True)
             return
-        if not user.voice or not user.voice.channel:
-            await interaction.followup.send(command_message("mute", language, "not_in_voice"), ephemeral=True)
+        if not isinstance(interaction.channel, discord.TextChannel):
+            await interaction.followup.send(command_message("mute", language, "invalid_channel"), ephemeral=True)
             return
-        if not interaction.guild.me or not interaction.guild.me.guild_permissions.mute_members:
+        if not interaction.guild.me or not interaction.guild.me.guild_permissions.manage_channels:
             await interaction.followup.send(command_message("mute", language, "dashboard_permission"), ephemeral=True)
             return
-        voice_channel = user.voice.channel
         display_reason = str(reason or "").strip()[:512] or command_message("mute", language, "no_reason")
-        await user.edit(mute=True, reason=display_reason)
+        await self._set_chat_mute(interaction.channel, user, True, display_reason, language)
         await self.write_log(
             interaction.guild,
             "moderation_mute",
             actor=interaction.user,
             target=user,
-            channel=voice_channel,
+            channel=interaction.channel,
             details=f"Reason: {display_reason}",
         )
         await interaction.followup.send(command_message("mute", language, "success", member=user.mention), ephemeral=True, allowed_mentions=discord.AllowedMentions(users=[user]))
 
-    @app_commands.command(name="unmute", description="Remove a server voice mute from a member.")
-    @app_commands.default_permissions(mute_members=True)
-    @app_commands.describe(user="Member whose server mute should be removed", reason="Why the mute is being removed")
+    @app_commands.command(name="unmute", description="Allow a member to send messages in this chat again.")
+    @app_commands.default_permissions(manage_channels=True)
+    @app_commands.describe(user="Member whose chat mute should be removed", reason="Why the chat mute is being removed")
     async def slash_unmute(self, interaction: discord.Interaction, user: discord.Member, reason: str | None = None) -> None:
         if not await self.active_interaction(interaction):
             return
@@ -3543,26 +4020,25 @@ class General(commands.Cog):
             return
         language = str(store.command_config(str(interaction.guild.id), "unmute").get("language") or "en")
         await interaction.response.defer(ephemeral=True, thinking=True)
-        if not interaction.user.guild_permissions.mute_members:
+        if not interaction.user.guild_permissions.manage_channels:
             await interaction.followup.send(command_message("unmute", language, "permission"), ephemeral=True)
             return
         problem = self.moderation_problem(interaction.guild, user)
         if problem:
             await interaction.followup.send(problem, ephemeral=True)
             return
-        if not user.voice or not user.voice.channel:
-            await interaction.followup.send(command_message("unmute", language, "not_in_voice"), ephemeral=True)
+        if not isinstance(interaction.channel, discord.TextChannel):
+            await interaction.followup.send(command_message("unmute", language, "invalid_channel"), ephemeral=True)
             return
-        if not interaction.guild.me or not interaction.guild.me.guild_permissions.mute_members:
+        if not interaction.guild.me or not interaction.guild.me.guild_permissions.manage_channels:
             await interaction.followup.send(command_message("unmute", language, "dashboard_permission"), ephemeral=True)
             return
-        if not user.voice.mute:
+        if not self._chat_mute_active(interaction.channel, user):
             await interaction.followup.send(command_message("unmute", language, "not_muted", member=user.mention), ephemeral=True)
             return
         display_reason = str(reason or "").strip()[:512] or command_message("unmute", language, "no_reason")
-        voice_channel = user.voice.channel
-        await user.edit(mute=False, reason=display_reason)
-        await self.write_log(interaction.guild, "moderation_unmute", actor=interaction.user, target=user, channel=voice_channel, details=f"Reason: {display_reason}")
+        await self._set_chat_mute(interaction.channel, user, False, display_reason, language)
+        await self.write_log(interaction.guild, "moderation_unmute", actor=interaction.user, target=user, channel=interaction.channel, details=f"Reason: {display_reason}")
         await interaction.followup.send(command_message("unmute", language, "success", member=user.mention), ephemeral=True, allowed_mentions=discord.AllowedMentions(users=[user]))
 
     @app_commands.command(name="lock", description="Lock this channel for @everyone.")

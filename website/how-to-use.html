@@ -3,16 +3,18 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="BirdBot bilingual guide to the dashboard, commands, moderation, tickets, logs, games, and music." />
+    <meta name="description" content="BirdBot bilingual guide to the dashboard, commands, moderation, tickets, logs, games, and member profiles." />
     <title>How to use BirdBot</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <script>
       try {
         const savedTheme = localStorage.getItem("birdbot-theme");
         if (savedTheme === "dark" || savedTheme === "light") document.documentElement.dataset.theme = savedTheme;
       } catch (_) {}
     </script>
-    <link rel="stylesheet" href="/assets/styles.css?v=ui88" />
-    <script src="/assets/theme.js?v=theme1" defer></script>
+    <link rel="stylesheet" href="/assets/styles.css?v=ui107" />
+    <script src="/assets/theme.js?v=theme2" defer></script>
   </head>
   <body>
     <div class="noise" aria-hidden="true"></div>
@@ -60,6 +62,7 @@
               <li>Use <strong>Add the bot</strong> if BirdBot is not in the server yet.</li>
               <li>Activation applies dashboard settings to that server only; it does not restart the bot.</li>
               <li>Save each form after editing it. The website reports when a change is queued or applied.</li>
+              <li>Open the <strong>Profile</strong> portal to review your recorded messages, image shares, voice time, and most active server.</li>
             </ul>
           </article>
 
@@ -68,8 +71,8 @@
             <p>Open the <strong>Commands</strong> tab to enable or disable prefix commands, set any prefix, and choose English or Arabic replies for each command. Open a command card to see its usage, options, permissions, and shortcuts.</p>
             <ul>
               <li>Save shortcuts one at a time; add more whenever you need them. A shortcut works by itself and runs the command it belongs to.</li>
-              <li>Moderation commands include <code>/kick</code>, <code>/ban</code>, <code>/warning</code>, <code>/unwarning</code>, <code>/show warning</code>, <code>/timeout</code>, <code>/mute</code>, <code>/lock</code>, <code>/unlock</code>, and <code>/delete</code>.</li>
-              <li>Music commands include <code>/play</code>, <code>/q</code>, <code>/pause</code>, <code>/skip</code>, and <code>/stop</code>. Join a voice channel before using them.</li>
+              <li>Moderation commands include <code>/kick</code>, <code>/ban</code>, <code>/warning</code>, <code>/unwarning</code>, <code>/show warning</code>, <code>/timeout</code>, <code>/untimeout</code>, <code>/mute</code>, <code>/unmute</code>, <code>/lock</code>, <code>/unlock</code>, and <code>/delete</code>. Use <code>/show level</code> to generate a shareable level card.</li>
+              <li><code>/mute</code> blocks the selected member from sending messages in the selected text channel only; it does not mute voice audio. Use <code>/unmute</code> to restore chat access.</li>
               <li>Commands are configured per server. The bot still needs the Discord permissions shown on the command card.</li>
             </ul>
           </article>
@@ -101,6 +104,7 @@
               <li>Voice logs include joins, leaves, moves, disconnects, server mute, and deafen changes.</li>
               <li>Message logs include sent, edited, and deleted messages. Member logs include joins, leaves, and profile or role changes.</li>
               <li>Moderation logs include kick, ban, unban, warning, unwarning, and timeout actions. Logs mention the user, action, and related channel or room when available.</li>
+              <li>Use <strong>Create Channel</strong> beside any log type to create and assign a private administrator-only Discord channel automatically.</li>
             </ul>
           </article>
 
@@ -140,6 +144,7 @@
               <li>Use the threshold fields for spam, raid joins, timeout length, and your banned-word list. Rules only affect new activity after they are saved.</li>
               <li>Add an auto-react rule by choosing a channel and emoji. Multiple channels can have separate rules; each rule can be edited, disabled, or removed.</li>
               <li>If AI is available, enable <strong>AI assistant</strong>, choose one response channel, and save. BirdBot replies to every human message in that channel; messages elsewhere are ignored.</li>
+              <li>Open <strong>Control Panel → Level</strong> to enable activity leveling, choose one of four progression styles, select English or Arabic announcements, and review top-level and daily/weekly activity leaderboards.</li>
             </ul>
           </article>
 
@@ -189,18 +194,8 @@
             </ul>
           </article>
 
-          <article class="help-section help-warning">
-            <h3>15. Music</h3>
-            <p><strong>Warning:</strong> The Music system may still be unreliable while playback issues are being fixed. The page includes queue, pause, shuffle, loop, seek, and volume controls.</p>
-            <ul>
-              <li>Open the Music portal, join a voice channel, and use <code>/play</code> or the website player.</li>
-              <li>Paste a YouTube/audio link or enter a music name. Running <code>/play</code> while a track is playing adds the new track to the queue.</li>
-              <li>Use <code>/q</code> to queue, <code>/pause</code> to pause, <code>/skip</code> to skip, and <code>/stop</code> to clear the queue and leave voice.</li>
-            </ul>
-          </article>
-
           <article class="help-section">
-            <h3>16. VC (premium)</h3>
+            <h3>15. VC (premium)</h3>
             <p><strong>VC</strong> is a premium control-panel feature for placing secure presence bots in voice channels. If your account has access, choose a voice channel for each available slot and save the placement.</p>
             <ul>
               <li>Each bot can be placed or removed independently.</li>
@@ -227,8 +222,8 @@
             <p>افتح تبويب <strong>الأوامر</strong> لتفعيل أو تعطيل أوامر البادئة، وكتابة أي بادئة، واختيار الردود بالعربية أو الإنجليزية لكل أمر. افتح بطاقة الأمر لرؤية طريقة الاستخدام والخيارات والصلاحيات والاختصارات.</p>
             <ul>
               <li>احفظ كل اختصار وحده، ويمكنك إضافة اختصارات أخرى لاحقاً. يعمل الاختصار بمفرده وينفّذ الأمر المرتبط به.</li>
-              <li>تشمل أوامر الإدارة <code>/kick</code> و<code>/ban</code> و<code>/warning</code> و<code>/unwarning</code> و<code>/show warning</code> و<code>/timeout</code> و<code>/mute</code> و<code>/lock</code> و<code>/unlock</code> و<code>/delete</code>.</li>
-              <li>تشمل أوامر الموسيقى <code>/play</code> و<code>/q</code> و<code>/pause</code> و<code>/skip</code> و<code>/stop</code>. انضم إلى قناة صوتية أولاً.</li>
+              <li>تشمل أوامر الإدارة <code>/kick</code> و<code>/ban</code> و<code>/warning</code> و<code>/unwarning</code> و<code>/show warning</code> و<code>/show level</code> و<code>/timeout</code> و<code>/untimeout</code> و<code>/mute</code> و<code>/unmute</code> و<code>/lock</code> و<code>/unlock</code> و<code>/delete</code>.</li>
+              <li>يمنع <code>/mute</code> العضو المحدد من إرسال الرسائل في القناة النصية المختارة فقط، ولا يكتم الصوت. استخدم <code>/unmute</code> لإعادة الوصول إلى الدردشة.</li>
               <li>تُحفظ الأوامر لكل خادم، ويحتاج البوت إلى صلاحيات Discord الموضحة في بطاقة الأمر.</li>
             </ul>
           </article>
@@ -348,18 +343,8 @@
             </ul>
           </article>
 
-          <article class="help-section help-warning">
-            <h3>١٥. الموسيقى</h3>
-            <p><strong>تحذير:</strong> قد يبقى نظام الموسيقى غير مستقر أثناء إصلاح مشاكل التشغيل. تتوفر أزرار قائمة الانتظار والإيقاف المؤقت والعشوائي والتكرار والتقديم والصوت.</p>
-            <ul>
-              <li>افتح بوابة الموسيقى وانضم إلى قناة صوتية واستخدم <code>/play</code> أو مشغل الموقع.</li>
-              <li>الصق رابط YouTube أو الصوت أو اكتب اسم الأغنية. إذا كانت الموسيقى تعمل، يضيف <code>/play</code> الأغنية الجديدة إلى قائمة الانتظار.</li>
-              <li>استخدم <code>/q</code> للإضافة و<code>/pause</code> للإيقاف المؤقت و<code>/skip</code> للتخطي و<code>/stop</code> لمسح القائمة ومغادرة القناة.</li>
-            </ul>
-          </article>
-
           <article class="help-section">
-            <h3>١٦. VC (ميزة مدفوعة)</h3>
+            <h3>١٥. VC (ميزة مدفوعة)</h3>
             <p><strong>VC</strong> ميزة مدفوعة في لوحة التحكم لوضع بوتات حضور آمنة في القنوات الصوتية. إذا كان حسابك يملك صلاحية الوصول، اختر قناة صوتية لكل خانة ثم احفظ.</p>
             <ul>
               <li>يمكن وضع كل بوت أو إزالته بشكل مستقل.</li>

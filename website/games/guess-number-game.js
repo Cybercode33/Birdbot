@@ -5,7 +5,7 @@
     id: "guess-number",
     name: "Guess the Number",
     bannerPath: "/assets/games/spy_banner.svg",
-    iconPath: "/assets/games/spy_icon.svg",
+    iconPath: "/assets/games/guess_number_icon.svg",
     minimumPlayers: 2,
     maximumPlayers: 20,
     numberMinimum: 1,
@@ -35,6 +35,7 @@
     element.src = src || DEFAULT_GAME.iconPath;
     element.alt = alt || "";
     element.loading = "lazy";
+    element.decoding = "async";
     element.addEventListener("error", () => element.remove());
     return element;
   }

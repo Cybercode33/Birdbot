@@ -153,7 +153,7 @@ class EyooBot(commands.Bot):
             # Dashboard settings use an underscore-safe key for the nested
             # ``show warning`` command. Discord.py resolves the actual prefix
             # command by its space-separated qualified name.
-            dispatched_name = "show warning" if command_name == "show_warning" else command_name
+            dispatched_name = {"show_warning": "show warning", "show_level": "show level"}.get(command_name, command_name)
             command = self.get_command(dispatched_name) or self.get_command(command_name)
             if command:
                 proxy = copy.copy(message)
@@ -395,6 +395,70 @@ class EyooBot(commands.Bot):
                     if general is None:
                         raise ValueError("The Temp VC system is not ready yet. Please try again.")
                     await general.run_dashboard_temp_vc(guild, request["requested_by"], request.get("payload") or {})
+                elif command_name == "create_log_channel":
+                    # Channel creation stays in the gateway process so the
+                    # website never needs a Discord token.  The requested
+                    # category is validated here as a final safety check,
+                    # then its destination is updated automatically.
+                    payload = request.get("payload") or {}
+                    category = str(payload.get("category") or "").casefold()
+                    names = {
+                        "voice": "voice-logs",
+                        "messages": "message-logs",
+                        "server": "server-logs",
+                        "members": "member-logs",
+                        "moderation": "moderation-logs",
+                    }
+                    if category not in names:
+                        raise ValueError("Choose a valid log type.")
+                    bot_member = guild.me
+                    if not bot_member or not bot_member.guild_permissions.manage_channels:
+                        raise ValueError("BirdBot needs Manage Channels permission to create a log channel.")
+                    # Log destinations contain moderation and member activity.
+                    # Deny @everyone and explicitly allow BirdBot; Discord's
+                    # Administrator permission then lets only administrators
+                    # bypass the channel deny.
+                    log_overwrites = {
+                        guild.default_role: discord.PermissionOverwrite(
+                            view_channel=False,
+                            send_messages=False,
+                            read_message_history=False,
+                        ),
+                        bot_member: discord.PermissionOverwrite(
+                            view_channel=True,
+                            send_messages=True,
+                            read_message_history=True,
+                            embed_links=True,
+                        ),
+                    }
+                    channel = next((item for item in guild.text_channels if item.name.casefold() == names[category]), None)
+                    if channel is None:
+                        channel = await guild.create_text_channel(
+                            names[category],
+                            overwrites=log_overwrites,
+                            reason=f"Created {category} log channel from the BirdBot dashboard",
+                        )
+                    else:
+                        # A channel created by an older version may still be
+                        # public. Re-apply the administrator-only policy when
+                        # the dashboard button is used again.
+                        await channel.edit(
+                            overwrites=log_overwrites,
+                            reason=f"Restrict {category} log channel to administrators",
+                        )
+                    store.upsert_bot_text_channel(str(guild.id), str(channel.id), channel.name)
+                    current = store.log_config(str(guild.id))
+                    categories = current.get("categories") if isinstance(current.get("categories"), dict) else {}
+                    categories = {key: bool(categories.get(key, True)) for key in ("voice", "messages", "server", "members", "moderation")}
+                    categories[category] = True
+                    destinations = current.get("category_channels") if isinstance(current.get("category_channels"), dict) else {}
+                    destinations = {key: destinations.get(key) for key in ("voice", "messages", "server", "members", "moderation")}
+                    destinations[category] = str(channel.id)
+                    store.save_log_config(
+                        str(guild.id), bool(current.get("enabled")), None, categories,
+                        request.get("requested_by"), category_channels=destinations,
+                    )
+                    command_result = {"channel_id": str(channel.id), "name": channel.name, "category": category}
                 elif command_name in {"role_create", "role_edit", "role_delete", "role_permissions"}:
                     general = self.get_cog("General")
                     if general is None:

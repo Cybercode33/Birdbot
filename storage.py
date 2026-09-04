@@ -6,11 +6,12 @@ import sqlite3
 import uuid
 import json
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from settings import COMMAND_PREFIX, DATA_PATH
+from settings import COMMAND_PREFIX, DATA_PATH, LEVEL_DATA_PATH
 from role_permissions import ROLE_PERMISSION_KEYS, normalize_role_permissions
 
 
@@ -30,6 +31,7 @@ DASHBOARD_COMMAND_NAMES = (
     "warning",
     "unwarning",
     "show_warning",
+    "show_level",
     "timeout",
     "untimeout",
     "mute",
@@ -37,9 +39,8 @@ DASHBOARD_COMMAND_NAMES = (
     "lock",
     "unlock",
     "delete",
-    # Music commands are managed from the same Commands tab as moderation
-    # commands.  The Discord Music cog exposes matching slash/prefix command
-    # names, so enable/disable, language, and shortcut settings stay in sync.
+    # Keep Discord Music command settings for existing prefix/shortcut data.
+    # The website no longer renders a Music portal or Music command cards.
     "play",
     "q",
     "pause",
@@ -89,13 +90,21 @@ def utc_now() -> str:
 
 
 class BirdBotStore:
-    """Use short-lived SQLite connections so the bot and web tasks can share safely."""
+    """Use short-lived SQLite connections for the dashboard and bot.
+
+    Member level progress and activity intentionally use a separate database
+    file, making a user-progress reset a simple file deletion while keeping
+    dashboard configuration intact.
+    """
 
     def __init__(self, path: Path = DATA_PATH) -> None:
         self.path = path
+        self.level_path = LEVEL_DATA_PATH
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.level_path.parent.mkdir(parents=True, exist_ok=True)
         self._memory_cache: dict[str, tuple[float, object]] = {}
         self._initialize()
+        self._initialize_levels()
 
     _CACHE_MISS = object()
 
@@ -116,11 +125,94 @@ class BirdBotStore:
     def _invalidate_cache(self) -> None:
         self._memory_cache.clear()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         connection = sqlite3.connect(self.path, timeout=10)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 10000")
-        return connection
+        try:
+            yield connection
+        except Exception:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+        finally:
+            connection.close()
+
+    @contextmanager
+    def _level_connect(self):
+        connection = sqlite3.connect(self.level_path, timeout=10)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 10000")
+        try:
+            yield connection
+        except Exception:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _initialize_levels(self) -> None:
+        """Create the isolated leveling database and its indexes."""
+        with self._level_connect() as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS level_members (
+                    guild_id TEXT NOT NULL,
+                    member_id TEXT NOT NULL,
+                    display_name TEXT NOT NULL DEFAULT '',
+                    username TEXT NOT NULL DEFAULT '',
+                    avatar_url TEXT,
+                    xp INTEGER NOT NULL DEFAULT 0,
+                    level INTEGER NOT NULL DEFAULT 1,
+                    message_count INTEGER NOT NULL DEFAULT 0,
+                    daily_messages INTEGER NOT NULL DEFAULT 0,
+                    weekly_messages INTEGER NOT NULL DEFAULT 0,
+                    day_key TEXT NOT NULL DEFAULT '',
+                    week_key TEXT NOT NULL DEFAULT '',
+                    last_message_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, member_id)
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_level_members_guild_level ON level_members (guild_id, level DESC, xp DESC, member_id)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_level_members_guild_daily ON level_members (guild_id, daily_messages DESC, updated_at DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_level_members_guild_weekly ON level_members (guild_id, weekly_messages DESC, updated_at DESC)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS profile_activity (
+                    guild_id TEXT NOT NULL,
+                    member_id TEXT NOT NULL,
+                    display_name TEXT NOT NULL DEFAULT '',
+                    username TEXT NOT NULL DEFAULT '',
+                    avatar_url TEXT,
+                    message_count INTEGER NOT NULL DEFAULT 0,
+                    image_count INTEGER NOT NULL DEFAULT 0,
+                    voice_seconds INTEGER NOT NULL DEFAULT 0,
+                    voice_joined_at TEXT,
+                    last_message_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, member_id)
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_profile_activity_member ON profile_activity (member_id, message_count DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_profile_activity_guild ON profile_activity (guild_id, message_count DESC)"
+            )
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -545,6 +637,34 @@ class BirdBotStore:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS level_configs (
+                    guild_id TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    style TEXT NOT NULL DEFAULT 'classic',
+                    channel_id TEXT,
+                    language TEXT NOT NULL DEFAULT 'en',
+                    xp_per_message INTEGER NOT NULL DEFAULT 10,
+                    updated_by TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS streak_configs (
+                    guild_id TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    channel_id TEXT,
+                    language TEXT NOT NULL DEFAULT 'en',
+                    next_number INTEGER NOT NULL DEFAULT 1,
+                    last_user_id TEXT,
+                    updated_by TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS spy_game_logs (
                     log_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     guild_id TEXT NOT NULL,
@@ -702,6 +822,9 @@ class BirdBotStore:
             ):
                 if name not in guess_number_config_columns:
                     connection.execute(f"ALTER TABLE guess_number_game_configs ADD COLUMN {name} {definition}")
+            streak_config_columns = {row["name"] for row in connection.execute("PRAGMA table_info(streak_configs)")}
+            if "language" not in streak_config_columns:
+                connection.execute("ALTER TABLE streak_configs ADD COLUMN language TEXT NOT NULL DEFAULT 'en'")
             ticket_record_columns = {row["name"] for row in connection.execute("PRAGMA table_info(tickets)")}
             if "channel_name" not in ticket_record_columns:
                 connection.execute("ALTER TABLE tickets ADD COLUMN channel_name TEXT NOT NULL DEFAULT ''")
@@ -1096,6 +1219,17 @@ class BirdBotStore:
                 (guild_id,),
             ).fetchall()
         return self._cache_set(key, [{"id": row["channel_id"], "name": row["name"]} for row in rows], ttl=20.0)  # type: ignore[return-value]
+
+    def upsert_bot_text_channel(self, guild_id: str, channel_id: str, name: str) -> None:
+        """Add a newly-created Discord text channel to the dashboard snapshot."""
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO bot_channels (channel_id, guild_id, name, last_seen_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(channel_id) DO UPDATE SET guild_id=excluded.guild_id, name=excluded.name, last_seen_at=excluded.last_seen_at",
+                (str(channel_id), str(guild_id), str(name)[:100], now),
+            )
+        self._invalidate_cache()
 
     def bot_voice_channels(self, guild_id: str) -> list[dict[str, object]]:
         key = f"bot_voice_channels:{guild_id}"
@@ -1505,6 +1639,558 @@ class BirdBotStore:
                 ).fetchall()
         result = [dict(row) for row in rows]
         return self._cache_set(key, result, ttl=3.0)  # type: ignore[return-value]
+
+    @staticmethod
+    def _level_default(guild_id: str) -> dict[str, object]:
+        return {
+            "guild_id": str(guild_id),
+            "enabled": False,
+            "style": "classic",
+            "channel_id": None,
+            "language": "en",
+            "xp_per_message": 10,
+            "updated_by": None,
+            "updated_at": None,
+        }
+
+    def level_config(self, guild_id: str) -> dict[str, object]:
+        """Return the dashboard-controlled activity-level configuration."""
+        guild_id = str(guild_id)
+        key = f"level_config:{guild_id}"
+        cached = self._cache_get(key)
+        if cached is not self._CACHE_MISS:
+            return cached  # type: ignore[return-value]
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT guild_id, enabled, style, channel_id, language, xp_per_message, updated_by, updated_at "
+                "FROM level_configs WHERE guild_id = ?", (guild_id,),
+            ).fetchone()
+        if not row:
+            return self._cache_set(key, self._level_default(guild_id), ttl=5.0)  # type: ignore[return-value]
+        result = {
+            "guild_id": guild_id,
+            "enabled": bool(row["enabled"]),
+            "style": str(row["style"] or "classic"),
+            "channel_id": row["channel_id"],
+            "language": str(row["language"] or "en"),
+            "xp_per_message": max(1, min(100, int(row["xp_per_message"] or 10))),
+            "updated_by": row["updated_by"],
+            "updated_at": row["updated_at"],
+        }
+        return self._cache_set(key, result, ttl=5.0)  # type: ignore[return-value]
+
+    def save_level_config(
+        self,
+        guild_id: str,
+        enabled: bool,
+        style: str = "classic",
+        channel_id: str | None = None,
+        language: str = "en",
+        xp_per_message: int = 10,
+        updated_by: str | None = None,
+    ) -> dict[str, object]:
+        guild_id = str(guild_id)
+        style = style if style in {"classic", "milestone", "activity", "streak"} else "classic"
+        language = "ar" if str(language).casefold() == "ar" else "en"
+        try:
+            xp_per_message = max(1, min(100, int(xp_per_message)))
+        except (TypeError, ValueError):
+            xp_per_message = 10
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO level_configs (guild_id, enabled, style, channel_id, language, xp_per_message, updated_by, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled, style=excluded.style, "
+                "channel_id=excluded.channel_id, language=excluded.language, xp_per_message=excluded.xp_per_message, updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+                (guild_id, int(bool(enabled)), style, str(channel_id) if channel_id else None, language, xp_per_message, updated_by, now),
+            )
+        self._invalidate_cache()
+        return self.level_config(guild_id)
+
+    @staticmethod
+    def _calculate_level(style: str, message_count: int, xp: int, daily_messages: int, weekly_messages: int) -> int:
+        """Keep four understandable progression styles while storing one score."""
+        count = max(0, int(message_count))
+        if style == "milestone":
+            return max(1, count // 10 + 1)
+        if style == "activity":
+            return max(1, count // 25 + 1)
+        if style == "streak":
+            # Keep the score monotonic while still rewarding members who are
+            # active today and throughout the current week.
+            return max(1, count // 10 + 1, (daily_messages + weekly_messages // 7) // 5 + 1)
+        # Classic XP: each next level costs 100 XP times its current level.
+        level = 1
+        remaining = max(0, int(xp))
+        while remaining >= level * 100 and level < 10_000:
+            remaining -= level * 100
+            level += 1
+        return level
+
+    def record_level_message(
+        self,
+        guild_id: str,
+        member_id: str,
+        display_name: str,
+        username: str,
+        avatar_url: str | None = None,
+    ) -> dict[str, object] | None:
+        """Record one member message and return progression/leaderboard data."""
+        guild_id, member_id = str(guild_id), str(member_id)
+        config = self.level_config(guild_id)
+        if not config.get("enabled"):
+            return None
+        now_dt = datetime.now(timezone.utc)
+        day_key = now_dt.date().isoformat()
+        iso = now_dt.isocalendar()
+        week_key = f"{iso.year}-W{iso.week:02d}"
+        now = now_dt.isoformat()
+        with self._level_connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM level_members WHERE guild_id = ? AND member_id = ?", (guild_id, member_id),
+            ).fetchone()
+            if row:
+                daily = int(row["daily_messages"] or 0) if row["day_key"] == day_key else 0
+                weekly = int(row["weekly_messages"] or 0) if row["week_key"] == week_key else 0
+                count = int(row["message_count"] or 0) + 1
+                xp = int(row["xp"] or 0) + int(config.get("xp_per_message") or 10)
+                previous_level = int(row["level"] or 1)
+                daily += 1
+                weekly += 1
+                level = self._calculate_level(str(config.get("style") or "classic"), count, xp, daily, weekly)
+                level = max(previous_level, level)
+                connection.execute(
+                    "UPDATE level_members SET display_name=?, username=?, avatar_url=?, xp=?, level=?, message_count=?, daily_messages=?, weekly_messages=?, day_key=?, week_key=?, last_message_at=?, updated_at=? WHERE guild_id=? AND member_id=?",
+                    (str(display_name or username)[:200], str(username or display_name)[:200], avatar_url, xp, level, count, daily, weekly, day_key, week_key, now, now, guild_id, member_id),
+                )
+            else:
+                count, xp, daily, weekly = 1, int(config.get("xp_per_message") or 10), 1, 1
+                previous_level = 1
+                level = self._calculate_level(str(config.get("style") or "classic"), count, xp, daily, weekly)
+                connection.execute(
+                    "INSERT INTO level_members (guild_id, member_id, display_name, username, avatar_url, xp, level, message_count, daily_messages, weekly_messages, day_key, week_key, last_message_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (guild_id, member_id, str(display_name or username)[:200], str(username or display_name)[:200], avatar_url, xp, level, count, daily, weekly, day_key, week_key, now, now),
+                )
+        self._invalidate_cache()
+        return {
+            "guild_id": guild_id,
+            "member_id": member_id,
+            "display_name": str(display_name or username),
+            "username": str(username or display_name),
+            "avatar_url": avatar_url,
+            "xp": xp,
+            "level": level,
+            "previous_level": previous_level,
+            "leveled_up": level > previous_level,
+            "message_count": count,
+            "daily_messages": daily,
+            "weekly_messages": weekly,
+        }
+
+    def record_profile_message(
+        self,
+        guild_id: str,
+        member_id: str,
+        display_name: str,
+        username: str,
+        avatar_url: str | None = None,
+        image_count: int = 0,
+    ) -> dict[str, object]:
+        """Record a human message for the member-facing Profile portal.
+
+        These counters are intentionally independent from the optional Level
+        feature, so a member's profile remains useful even when leveling is
+        disabled for a server.
+        """
+        guild_id, member_id = str(guild_id), str(member_id)
+        now = utc_now()
+        try:
+            images = max(0, int(image_count))
+        except (TypeError, ValueError):
+            images = 0
+        with self._level_connect() as connection:
+            row = connection.execute(
+                "SELECT message_count, image_count FROM profile_activity WHERE guild_id = ? AND member_id = ?",
+                (guild_id, member_id),
+            ).fetchone()
+            if row:
+                message_count = int(row["message_count"] or 0) + 1
+                image_total = int(row["image_count"] or 0) + images
+                connection.execute(
+                    "UPDATE profile_activity SET display_name=?, username=?, avatar_url=?, message_count=?, image_count=?, last_message_at=?, updated_at=? WHERE guild_id=? AND member_id=?",
+                    (str(display_name or username)[:200], str(username or display_name)[:200], avatar_url,
+                     message_count, image_total, now, now, guild_id, member_id),
+                )
+            else:
+                message_count, image_total = 1, images
+                connection.execute(
+                    "INSERT INTO profile_activity (guild_id, member_id, display_name, username, avatar_url, message_count, image_count, last_message_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (guild_id, member_id, str(display_name or username)[:200], str(username or display_name)[:200], avatar_url,
+                     message_count, image_total, now, now),
+                )
+        self._invalidate_cache()
+        return {
+            "guild_id": guild_id,
+            "member_id": member_id,
+            "message_count": message_count,
+            "image_count": image_total,
+        }
+
+    def record_profile_voice_state(
+        self,
+        guild_id: str,
+        member_id: str,
+        display_name: str,
+        username: str,
+        avatar_url: str | None = None,
+        connected: bool = False,
+    ) -> dict[str, object]:
+        """Start or close a member voice session and accumulate its duration."""
+        guild_id, member_id = str(guild_id), str(member_id)
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        with self._level_connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM profile_activity WHERE guild_id = ? AND member_id = ?",
+                (guild_id, member_id),
+            ).fetchone()
+            voice_seconds = int(row["voice_seconds"] or 0) if row else 0
+            joined_at = str(row["voice_joined_at"] or "") if row else ""
+            if not connected and joined_at:
+                try:
+                    started = datetime.fromisoformat(joined_at)
+                    voice_seconds += max(0, int((now_dt - started).total_seconds()))
+                except (TypeError, ValueError):
+                    pass
+                joined_at = ""
+            elif connected and not joined_at:
+                joined_at = now
+            if row:
+                connection.execute(
+                    "UPDATE profile_activity SET display_name=?, username=?, avatar_url=?, voice_seconds=?, voice_joined_at=?, updated_at=? WHERE guild_id=? AND member_id=?",
+                    (str(display_name or username)[:200], str(username or display_name)[:200], avatar_url,
+                     voice_seconds, joined_at or None, now, guild_id, member_id),
+                )
+            else:
+                connection.execute(
+                    "INSERT INTO profile_activity (guild_id, member_id, display_name, username, avatar_url, voice_seconds, voice_joined_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (guild_id, member_id, str(display_name or username)[:200], str(username or display_name)[:200], avatar_url,
+                     voice_seconds, joined_at or None, now),
+                )
+        self._invalidate_cache()
+        return {"guild_id": guild_id, "member_id": member_id, "voice_seconds": voice_seconds, "voice_joined_at": joined_at or None}
+
+    def profile_activity(self, member_id: str, guild_ids: Iterable[str] | None = None) -> list[dict[str, object]]:
+        """Return per-server member activity, including a live voice session."""
+        member_id = str(member_id)
+        # ``None`` means all known servers for internal callers; an explicitly
+        # empty iterable means the caller has no permitted servers and must
+        # receive an empty result rather than an unfiltered query.
+        ids = [str(value) for value in guild_ids if str(value)] if guild_ids is not None else []
+        if guild_ids is not None and not ids:
+            return []
+        with self._level_connect() as connection:
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                rows = connection.execute(
+                    f"SELECT guild_id, member_id, display_name, username, avatar_url, message_count, image_count, voice_seconds, voice_joined_at, last_message_at, updated_at FROM profile_activity WHERE member_id = ? AND guild_id IN ({placeholders})",
+                    (member_id, *ids),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT guild_id, member_id, display_name, username, avatar_url, message_count, image_count, voice_seconds, voice_joined_at, last_message_at, updated_at FROM profile_activity WHERE member_id = ?",
+                    (member_id,),
+                ).fetchall()
+        now = datetime.now(timezone.utc)
+        result: list[dict[str, object]] = []
+        for row in rows:
+            item = dict(row)
+            seconds = int(item.get("voice_seconds") or 0)
+            joined_at = str(item.get("voice_joined_at") or "")
+            if joined_at:
+                try:
+                    seconds += max(0, int((now - datetime.fromisoformat(joined_at)).total_seconds()))
+                except (TypeError, ValueError):
+                    pass
+            item["voice_seconds"] = seconds
+            item.pop("voice_joined_at", None)
+            result.append(item)
+        result.sort(key=lambda item: (int(item.get("message_count") or 0), int(item.get("image_count") or 0)), reverse=True)
+        return result
+
+    def profile_activity_totals(self, member_id: str, guild_ids: Iterable[str] | None = None) -> dict[str, object]:
+        rows = self.profile_activity(member_id, guild_ids)
+        messages = sum(int(row.get("message_count") or 0) for row in rows)
+        images = sum(int(row.get("image_count") or 0) for row in rows)
+        voice_seconds = sum(int(row.get("voice_seconds") or 0) for row in rows)
+        return {
+            "messages": messages,
+            "images": images,
+            "voice_seconds": voice_seconds,
+            "servers": rows,
+        }
+
+    def level_leaderboard(self, guild_id: str, limit: int = 10) -> list[dict[str, object]]:
+        with self._level_connect() as connection:
+            rows = connection.execute(
+                "SELECT member_id, display_name, username, avatar_url, level, xp, message_count FROM level_members WHERE guild_id = ? ORDER BY level DESC, xp DESC, message_count DESC, member_id ASC LIMIT ?",
+                (str(guild_id), max(1, min(50, int(limit)))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def level_activity(self, guild_id: str, period: str = "daily", limit: int = 10) -> list[dict[str, object]]:
+        column = "weekly_messages" if period == "weekly" else "daily_messages"
+        now_dt = datetime.now(timezone.utc)
+        if period == "weekly":
+            iso = now_dt.isocalendar()
+            period_key, key_column = f"{iso.year}-W{iso.week:02d}", "week_key"
+        else:
+            period_key, key_column = now_dt.date().isoformat(), "day_key"
+        with self._level_connect() as connection:
+            rows = connection.execute(
+                f"SELECT member_id, display_name, username, avatar_url, level, {column} AS messages FROM level_members WHERE guild_id = ? AND {key_column} = ? AND {column} > 0 ORDER BY messages DESC, level DESC, member_id ASC LIMIT ?",
+                (str(guild_id), period_key, max(1, min(50, int(limit)))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def level_stats(self, guild_id: str, limit: int = 10) -> dict[str, list[dict[str, object]]]:
+        return {
+            "leaderboard": self.level_leaderboard(guild_id, limit),
+            "daily": self.level_activity(guild_id, "daily", limit),
+            "weekly": self.level_activity(guild_id, "weekly", limit),
+        }
+
+    def level_member_stats(self, guild_id: str, member_id: str) -> dict[str, object]:
+        """Return a member's level card data and their three leaderboard ranks.
+
+        Ranks are calculated from the same ordering used by the dashboard
+        leaderboards.  A member with no activity (or no activity in the
+        current day/week) receives ``None`` for that period's rank.
+        """
+        guild_id, member_id = str(guild_id), str(member_id)
+        config = self.level_config(guild_id)
+        style = str(config.get("style") or "classic")
+        now_dt = datetime.now(timezone.utc)
+        day_key = now_dt.date().isoformat()
+        iso = now_dt.isocalendar()
+        week_key = f"{iso.year}-W{iso.week:02d}"
+        with self._level_connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM level_members WHERE guild_id = ? AND member_id = ?",
+                (guild_id, member_id),
+            ).fetchone()
+            all_rows = connection.execute(
+                "SELECT member_id, level, xp, message_count, daily_messages, weekly_messages, day_key, week_key "
+                "FROM level_members WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchall()
+
+        if row:
+            level = max(1, int(row["level"] or 1))
+            xp = max(0, int(row["xp"] or 0))
+            message_count = max(0, int(row["message_count"] or 0))
+            daily_messages = max(0, int(row["daily_messages"] or 0)) if row["day_key"] == day_key else 0
+            weekly_messages = max(0, int(row["weekly_messages"] or 0)) if row["week_key"] == week_key else 0
+            display_name = str(row["display_name"] or row["username"] or member_id)
+            username = str(row["username"] or display_name)
+            avatar_url = row["avatar_url"]
+        else:
+            level = 1
+            xp = message_count = daily_messages = weekly_messages = 0
+            display_name = username = member_id
+            avatar_url = None
+
+        # Progress is shown against the next level's threshold.  The classic
+        # style uses cumulative XP; the other styles use their message
+        # milestone.  Streak is activity-based, so a ten-message milestone is
+        # a clear, predictable progress indicator for the card.
+        if style == "classic":
+            level_floor = sum(index * 100 for index in range(1, level))
+            required = max(100, level * 100)
+            current = max(0, xp - level_floor)
+            unit = "XP"
+        else:
+            required = 25 if style == "activity" else 10
+            level_floor = max(0, (level - 1) * required)
+            current = max(0, message_count - level_floor)
+            unit = "messages"
+        current = min(required, current)
+        remaining = max(0, required - current)
+        progress_percent = round((current / required) * 100) if required else 0
+
+        # Stable tie-breaks prevent rank flicker when two members have the
+        # same score. Discord snowflake IDs sort consistently as strings here.
+        def top_before(candidate: sqlite3.Row) -> bool:
+            return (
+                int(candidate["level"] or 1) > level
+                or (int(candidate["level"] or 1) == level and int(candidate["xp"] or 0) > xp)
+                or (int(candidate["level"] or 1) == level and int(candidate["xp"] or 0) == xp
+                    and int(candidate["message_count"] or 0) > message_count)
+                or (int(candidate["level"] or 1) == level and int(candidate["xp"] or 0) == xp
+                    and int(candidate["message_count"] or 0) == message_count
+                    and str(candidate["member_id"]) < member_id)
+            )
+
+        top_rank = (1 + sum(1 for candidate in all_rows if top_before(candidate))) if row else None
+
+        def period_rank(period: str) -> int | None:
+            if period == "daily":
+                key_column, period_key, count_key = "day_key", day_key, "daily_messages"
+            else:
+                key_column, period_key, count_key = "week_key", week_key, "weekly_messages"
+            own_count = daily_messages if period == "daily" else weekly_messages
+            if not row or own_count <= 0:
+                return None
+            def before(candidate: sqlite3.Row) -> bool:
+                if str(candidate[key_column] or "") != period_key or int(candidate[count_key] or 0) <= 0:
+                    return False
+                candidate_count = int(candidate[count_key] or 0)
+                candidate_level = int(candidate["level"] or 1)
+                return (
+                    candidate_count > own_count
+                    or (candidate_count == own_count and candidate_level > level)
+                    or (candidate_count == own_count and candidate_level == level and str(candidate["member_id"]) < member_id)
+                )
+            return 1 + sum(1 for candidate in all_rows if before(candidate))
+
+        daily_rank = period_rank("daily")
+        weekly_rank = period_rank("weekly")
+        return {
+            "guild_id": guild_id,
+            "member_id": member_id,
+            "display_name": display_name,
+            "username": username,
+            "avatar_url": avatar_url,
+            "enabled": bool(config.get("enabled")),
+            "style": style,
+            "language": str(config.get("language") or "en"),
+            "level": level,
+            "xp": xp,
+            "message_count": message_count,
+            "daily_messages": daily_messages,
+            "weekly_messages": weekly_messages,
+            "progress_current": current,
+            "progress_required": required,
+            "progress_remaining": remaining,
+            "progress_percent": progress_percent,
+            "progress_unit": unit,
+            "top_levels_rank": top_rank,
+            "daily_rank": daily_rank,
+            "weekly_rank": weekly_rank,
+        }
+
+    @staticmethod
+    def _streak_default(guild_id: str) -> dict[str, object]:
+        return {
+            "guild_id": str(guild_id),
+            "enabled": False,
+            "channel_id": None,
+            "language": "en",
+            "next_number": 1,
+            "last_user_id": None,
+            "updated_by": None,
+            "updated_at": None,
+        }
+
+    def streak_config(self, guild_id: str) -> dict[str, object]:
+        """Return the configured number-streak channel and live sequence state."""
+        guild_id = str(guild_id)
+        key = f"streak_config:{guild_id}"
+        cached = self._cache_get(key)
+        if cached is not self._CACHE_MISS:
+            return cached  # type: ignore[return-value]
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT guild_id, enabled, channel_id, language, next_number, last_user_id, updated_by, updated_at "
+                "FROM streak_configs WHERE guild_id = ?", (guild_id,),
+            ).fetchone()
+        if not row:
+            return self._cache_set(key, self._streak_default(guild_id), ttl=3.0)  # type: ignore[return-value]
+        try:
+            next_number = max(1, int(row["next_number"] or 1))
+        except (TypeError, ValueError):
+            next_number = 1
+        result = {
+            "guild_id": guild_id,
+            "enabled": bool(row["enabled"]),
+            "channel_id": row["channel_id"],
+            "language": "ar" if str(row["language"] or "en").casefold() == "ar" else "en",
+            "next_number": next_number,
+            "last_user_id": row["last_user_id"],
+            "updated_by": row["updated_by"],
+            "updated_at": row["updated_at"],
+        }
+        return self._cache_set(key, result, ttl=3.0)  # type: ignore[return-value]
+
+    def save_streak_config(
+        self,
+        guild_id: str,
+        enabled: bool,
+        channel_id: str | None = None,
+        language: str = "en",
+        updated_by: str | None = None,
+    ) -> dict[str, object]:
+        """Save streak settings and start a fresh sequence at one.
+
+        Saving the card intentionally resets the live state so changing the
+        channel or disabling/re-enabling the game never leaves a stale turn.
+        """
+        guild_id = str(guild_id)
+        language = "ar" if str(language).casefold() == "ar" else "en"
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO streak_configs (guild_id, enabled, channel_id, language, next_number, last_user_id, updated_by, updated_at) "
+                "VALUES (?, ?, ?, ?, 1, NULL, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled, "
+                "channel_id=excluded.channel_id, language=excluded.language, next_number=1, last_user_id=NULL, updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+                (guild_id, int(bool(enabled)), str(channel_id) if channel_id else None, language, updated_by, now),
+            )
+        self._invalidate_cache()
+        return self.streak_config(guild_id)
+
+    def record_streak_number(self, guild_id: str, channel_id: str, member_id: str, number: int) -> dict[str, object] | None:
+        """Validate one turn and atomically advance or reset the sequence."""
+        guild_id, channel_id, member_id = str(guild_id), str(channel_id), str(member_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT enabled, channel_id, language, next_number, last_user_id FROM streak_configs WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+            if not row or not bool(row["enabled"]) or str(row["channel_id"] or "") != channel_id:
+                return None
+            try:
+                expected = max(1, int(row["next_number"] or 1))
+            except (TypeError, ValueError):
+                expected = 1
+            last_user_id = str(row["last_user_id"] or "")
+            language = "ar" if str(row["language"] or "en").casefold() == "ar" else "en"
+            if int(number) == expected and member_id != last_user_id:
+                next_number = expected + 1
+                connection.execute(
+                    "UPDATE streak_configs SET next_number=?, last_user_id=? WHERE guild_id=?",
+                    (next_number, member_id, guild_id),
+                )
+                result = {
+                    "status": "accepted",
+                    "expected": expected,
+                    "next_number": next_number,
+                    "last_user_id": member_id,
+                    "language": language,
+                }
+            else:
+                connection.execute(
+                    "UPDATE streak_configs SET next_number=1, last_user_id=NULL WHERE guild_id=?",
+                    (guild_id,),
+                )
+                result = {
+                    "status": "broken",
+                    "expected": expected,
+                    "received": int(number),
+                    "last_user_id": last_user_id or None,
+                    "language": language,
+                }
+        self._invalidate_cache()
+        return result
 
     def bot_categories(self, guild_id: str) -> list[dict[str, str]]:
         key = f"bot_categories:{guild_id}"

@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 from discord_members import resolve_guild_member
@@ -551,13 +550,15 @@ class GuessNumberView(discord.ui.View):
         join = discord.ui.Button(
             label="انضمام" if arabic else "Join",
             style=discord.ButtonStyle.secondary,
-            emoji=_game_button_emoji("GUESS_NUMBER_JOIN_EMOJI", "🎮"),
+            # Use the same configured lobby stickers as Spy and Roulette so
+            # every game presents identical Join/Leave controls.
+            emoji=_game_button_emoji("SPY_JOIN_EMOJI", "🎮"),
             custom_id=f"birdbot:guess_number:join:{game.guild.id}:{game.channel.id}",
         )
         leave = discord.ui.Button(
             label="مغادرة" if arabic else "Leave",
             style=discord.ButtonStyle.secondary,
-            emoji=_game_button_emoji("GUESS_NUMBER_LEAVE_EMOJI", "🚪"),
+            emoji=_game_button_emoji("SPY_LEAVE_EMOJI", "🚪"),
             custom_id=f"birdbot:guess_number:leave:{game.guild.id}:{game.channel.id}",
         )
         start = discord.ui.Button(
@@ -672,7 +673,14 @@ class GuessNumberView(discord.ui.View):
 
 
 class GuessNumber(commands.Cog):
-    """Expose /guess-number, !guess-number, and dashboard-created lobbies."""
+    """Expose the button-based game and dashboard-created lobbies.
+
+    Guess the Number is intentionally started from the game selector, a lobby
+    button, or the dashboard.  The former ``/guess`` and ``/guess-number``
+    slash commands are not registered anymore; keeping the internal command
+    helper allows the Spy game selector to launch a lobby without exposing a
+    duplicate slash entry.
+    """
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -707,9 +715,9 @@ class GuessNumber(commands.Cog):
         if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
             await self._interaction_message(interaction, "Guess the Number can only be played in a server text channel.")
             return
-        # A slash command may need to edit the public game message before it
-        # can answer privately.  Defer first so a slow Discord API response
-        # never makes the command interaction expire.
+        # The game selector may need to edit the public game message before it
+        # can answer privately. Defer first so a slow Discord API response
+        # never makes the component interaction expire.
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True, thinking=True)
         if not store.is_guild_activated(interaction.guild.id):
@@ -752,16 +760,6 @@ class GuessNumber(commands.Cog):
             await self._interaction_message(interaction, "Lobby created. Other players can join using the button.")
         except (ValueError, discord.Forbidden, discord.HTTPException) as error:
             await self._interaction_message(interaction, str(error) or "The game could not be started.")
-
-    @app_commands.command(name="guess-number", description="Start or play a Guess the Number game.")
-    @app_commands.describe(guess="Your whole-number guess when a game is already running")
-    async def guess_number_slash(self, interaction: discord.Interaction, guess: int | None = None) -> None:
-        await self._command(interaction, guess)
-
-    @app_commands.command(name="guess", description="Start or play Guess the Number.")
-    @app_commands.describe(guess="Your whole-number guess when a game is already running")
-    async def guess_slash(self, interaction: discord.Interaction, guess: int | None = None) -> None:
-        await self._command(interaction, guess)
 
     @commands.command(name="guess-number", aliases=("guess", "number"))
     async def guess_number_prefix(self, ctx: commands.Context[commands.Bot], guess: int | None = None) -> None:

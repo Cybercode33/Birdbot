@@ -1,6 +1,6 @@
 @import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700;800&display=swap");
 
-:root { color-scheme: dark; font-family: Outfit, Arial, sans-serif; background: #050505; color: #f8f8f8; }
+:root { color-scheme: light; font-family: Outfit, Arial, sans-serif; background: #f5f7fb; color: #17223a; }
 * { box-sizing: border-box; }
 body { min-height: 100svh; margin: 0; position: relative; isolation: isolate; overflow-x: hidden; background: radial-gradient(circle at 50% 25%, #272727 0%, #0a0a0a 43%, #030303 100%); }
 button, a { font: inherit; }
@@ -33,7 +33,6 @@ h1, h2, h3, p { margin-top: 0; } h1 { margin-bottom: 0; color: #fff; cursor: def
 .portal-choice-card-title { font-size: clamp(1.1rem, 2vw, 1.45rem); }
 .portal-choice-card-copy { max-width: 30ch; color: #a8a8a8; font-size: .78rem; line-height: 1.5; }
 .portal-choice-card-link { align-self: end; margin-top: auto; color: #fff; font: .67rem "DM Mono", monospace; letter-spacing: .04em; }
-.portal-music-card { border-color: rgba(47,191,113,.45); }
 .portal-server-card { min-height: 150px; }
 .portal-choice-icon { width: 42px; height: 42px; border-radius: 12px; object-fit: cover; background: #292929; }
 .management-view { grid-template-columns: minmax(240px, 26vw) minmax(0, 1fr); gap: clamp(1.25rem, 4vw, 4rem); }
@@ -565,8 +564,10 @@ body.is-preloading main, body.is-preloading .site-header { pointer-events: none;
 .music-playlist-play-button:hover { transform: translateY(-1px); background: #49d989; box-shadow: 0 0 16px rgba(47,191,113,.3); }
 .music-playlist-play-button:disabled { opacity: .5; cursor: not-allowed; transform: none; box-shadow: none; }
 
-/* Lightweight site-wide atmosphere.  The shapes use only opacity and
-   transform animations so the background remains smooth on mobile devices. */
+/* Lightweight site-wide atmosphere. The shapes stay decorative and are
+   reduced to inexpensive transforms/opacity so the background remains smooth
+   on mobile devices. The performance layer at the end keeps them static when
+   the page is under load. */
 .ambient-background { position: fixed; z-index: -3; inset: 0; overflow: hidden; pointer-events: none; contain: paint; background: linear-gradient(120deg, #050505 0%, #151515 31%, #292929 50%, #0b0b0b 72%, #020202 100%); }
 .ambient-background::before, .ambient-background::after { position: absolute; inset: 0; content: ""; pointer-events: none; }
 .ambient-background::before { background: radial-gradient(ellipse at 18% 24%, rgba(255,255,255,.16), transparent 26%), radial-gradient(ellipse at 84% 72%, rgba(255,255,255,.1), transparent 28%); }
@@ -1068,6 +1069,195 @@ input:focus, textarea:focus, select:focus, .channel-select:focus, .member-select
 .close-button { color: var(--page-muted); }
 .close-button:hover { background: var(--page-accent-soft); color: var(--page-accent-dark); }
 .modal { background: rgba(15, 23, 42, .35); }
+
+/* Light-mode text contrast pass. A few older feature-specific rules used
+   near-white text for the original dark palette; explicitly map those
+   descendants to the light theme tokens so they remain readable on cards,
+   rows, and status surfaces. */
+:root:not([data-theme="dark"]) .account-name,
+:root:not([data-theme="dark"]) .portal-choice-card-link,
+:root:not([data-theme="dark"]) .music-art-fallback,
+:root:not([data-theme="dark"]) .ban-list > strong,
+:root:not([data-theme="dark"]) .command-card-title,
+:root:not([data-theme="dark"]) .command-config-header strong,
+:root:not([data-theme="dark"]) .command-usage-code,
+:root:not([data-theme="dark"]) .ticket-record-details dd,
+:root:not([data-theme="dark"]) .spy-log-main,
+:root:not([data-theme="dark"]) .role-permission-group h4,
+:root:not([data-theme="dark"]) .role-permission-option strong {
+  color: var(--page-ink) !important;
+}
+
+:root:not([data-theme="dark"]) .signout-button,
+:root:not([data-theme="dark"]) .portal-choice-card-copy,
+:root:not([data-theme="dark"]) .member-option-details small,
+:root:not([data-theme="dark"]) .member-search-status,
+:root:not([data-theme="dark"]) .member-options-empty,
+:root:not([data-theme="dark"]) .ban-count,
+:root:not([data-theme="dark"]) .ticket-log-id-label,
+:root:not([data-theme="dark"]) .command-description,
+:root:not([data-theme="dark"]) .command-announcement,
+:root:not([data-theme="dark"]) .command-requirement,
+:root:not([data-theme="dark"]) .role-row-details small,
+:root:not([data-theme="dark"]) .role-permission-option small,
+:root:not([data-theme="dark"]) .ban-row,
+:root:not([data-theme="dark"]) .ban-user-id,
+:root:not([data-theme="dark"]) .ticket-panel-kicker,
+:root:not([data-theme="dark"]) .spy-game-hero-copy p,
+:root:not([data-theme="dark"]) .spy-game-launch-card p,
+:root:not([data-theme="dark"]) .spy-channel-label,
+:root:not([data-theme="dark"]) .spy-language-label,
+:root:not([data-theme="dark"]) .spy-config-copy,
+:root:not([data-theme="dark"]) .spy-config-field,
+:root:not([data-theme="dark"]) .spy-rule-card p,
+:root:not([data-theme="dark"]) .spy-log-field,
+:root:not([data-theme="dark"]) .games-loading,
+:root:not([data-theme="dark"]) .roulette-launch-card > p,
+:root:not([data-theme="dark"]) .roulette-palette-item,
+:root:not([data-theme="dark"]) .music-status,
+:root:not([data-theme="dark"]) .music-status-pending {
+  color: var(--page-muted) !important;
+}
+:root:not([data-theme="dark"]) .music-status-error { color: var(--page-danger) !important; }
+:root:not([data-theme="dark"]) .ticket-list-summary,
+:root:not([data-theme="dark"]) .roulette-color-hint,
+:root:not([data-theme="dark"]) .temp-vc-empty,
+:root:not([data-theme="dark"]) .vc-presence-copy,
+:root:not([data-theme="dark"]) .vc-presence-load-status,
+:root:not([data-theme="dark"]) .vc-presence-feedback,
+:root:not([data-theme="dark"]) .role-permissions-heading p,
+:root:not([data-theme="dark"]) .command-settings-status { color: var(--page-muted) !important; }
+:root:not([data-theme="dark"]) .automod-form-status.is-loading,
+:root:not([data-theme="dark"]) .command-settings-status.is-loading,
+:root:not([data-theme="dark"]) .temp-vc-status.is-loading,
+:root:not([data-theme="dark"]) .vc-presence-load-status.is-loading,
+:root:not([data-theme="dark"]) .vc-presence-feedback.is-loading { color: var(--page-muted) !important; }
+:root:not([data-theme="dark"]) .vc-presence-load-status.is-error,
+:root:not([data-theme="dark"]) .vc-presence-feedback.is-error { color: var(--page-danger) !important; }
+:root:not([data-theme="dark"]) .automod-form-status.is-success,
+:root:not([data-theme="dark"]) .command-settings-status.is-success,
+:root:not([data-theme="dark"]) .temp-vc-status.is-success,
+:root:not([data-theme="dark"]) .vc-presence-feedback.is-success { color: var(--page-success) !important; }
+:root:not([data-theme="dark"]) .ticket-remove-option,
+:root:not([data-theme="dark"]) .ticket-remove-icon {
+  border-color: #f3a0ad;
+  background: var(--page-danger-soft);
+  color: var(--page-danger);
+}
+:root:not([data-theme="dark"]) .ticket-preview-button {
+  border-color: var(--page-line-strong);
+  background: var(--page-surface-solid);
+  color: var(--page-ink);
+}
+:root:not([data-theme="dark"]) .ticket-preview-button-primary {
+  border-color: var(--page-accent);
+  background: var(--page-accent);
+  color: #fff;
+}
+:root:not([data-theme="dark"]) .ticket-preview-button-success {
+  border-color: var(--page-success);
+  background: var(--page-success);
+  color: #fff;
+}
+:root:not([data-theme="dark"]) .ticket-preview-button-danger {
+  border-color: var(--page-danger);
+  background: var(--page-danger);
+  color: #fff;
+}
+:root:not([data-theme="dark"]) .ticket-preview-button-secondary {
+  border-color: var(--page-line-strong);
+  background: #f8fafc;
+  color: var(--page-ink);
+}
+:root:not([data-theme="dark"]) .ticket-log-dm-delivered {
+  border-color: #86d9ad;
+  background: var(--page-success-soft);
+  color: var(--page-success);
+}
+:root:not([data-theme="dark"]) .ticket-log-dm-failed {
+  border-color: #e2bd62;
+  background: var(--page-warning-soft);
+  color: var(--page-warning);
+}
+:root:not([data-theme="dark"]) .ticket-log-opened .ticket-log-event-name,
+:root:not([data-theme="dark"]) .ticket-log-created .ticket-log-event-name {
+  color: var(--page-success);
+}
+:root:not([data-theme="dark"]) .ticket-log-claimed .ticket-log-event-name { color: var(--page-accent-dark); }
+:root:not([data-theme="dark"]) .ticket-log-closed .ticket-log-event-name,
+:root:not([data-theme="dark"]) .ticket-log-auto_deleted .ticket-log-event-name { color: var(--page-danger); }
+:root:not([data-theme="dark"]) .guild-log-event { color: var(--page-accent-dark) !important; }
+
+:root:not([data-theme="dark"]) .commands-settings-toolbar {
+  border-color: var(--page-line);
+  background: var(--page-surface);
+  box-shadow: var(--page-shadow);
+  color: var(--page-ink);
+}
+:root:not([data-theme="dark"]) .commands-prefix-field,
+:root:not([data-theme="dark"]) .command-inline-toggle { color: var(--page-ink); }
+:root:not([data-theme="dark"]) .command-settings-summary {
+  border-color: var(--page-line);
+  color: var(--page-muted);
+}
+:root:not([data-theme="dark"]) .command-group-line { background: var(--page-line-strong); }
+:root:not([data-theme="dark"]) .control-panel-card-action .control-panel-card-status {
+  border-color: var(--page-line);
+  background: var(--page-surface-solid);
+  color: var(--page-muted);
+}
+
+:root:not([data-theme="dark"]) .ticket-record-status {
+  border-color: var(--page-line);
+  background: var(--page-surface-solid);
+  color: var(--page-muted);
+}
+:root:not([data-theme="dark"]) .ticket-status-open .ticket-record-status,
+:root:not([data-theme="dark"]) .ticket-status-claimed .ticket-record-status {
+  border-color: #86d9ad;
+  background: var(--page-success-soft);
+  color: var(--page-success);
+}
+:root:not([data-theme="dark"]) .ticket-record-timeout {
+  border-color: #e2bd62;
+  background: var(--page-warning-soft);
+  color: var(--page-warning);
+}
+:root:not([data-theme="dark"]) .ticket-record-timeout.is-expired {
+  border-color: #f3a0ad;
+  background: var(--page-danger-soft);
+  color: var(--page-danger);
+}
+:root:not([data-theme="dark"]) .ticket-record-details div { border-bottom-color: var(--page-line); }
+
+:root:not([data-theme="dark"]) .automod-status.is-enabled {
+  border-color: #86d9ad;
+  background: var(--page-success-soft);
+  color: var(--page-success);
+}
+:root:not([data-theme="dark"]) .ticket-config-state {
+  border-color: #86d9ad;
+  background: var(--page-success-soft);
+  color: var(--page-success);
+}
+:root:not([data-theme="dark"]) .spy-game-launch-card,
+:root:not([data-theme="dark"]) .roulette-launch-card {
+  border-color: var(--page-line);
+  background: var(--page-surface-solid);
+  color: var(--page-ink);
+}
+:root:not([data-theme="dark"]) .spy-lobby-status,
+:root:not([data-theme="dark"]) .spy-config-status { color: var(--page-muted); }
+:root:not([data-theme="dark"]) .spy-lobby-status.is-success,
+:root:not([data-theme="dark"]) .spy-config-status.is-success { color: var(--page-success); }
+:root:not([data-theme="dark"]) .spy-lobby-status.is-error,
+:root:not([data-theme="dark"]) .spy-config-status.is-error { color: var(--page-danger); }
+:root:not([data-theme="dark"]) .spy-lobby-status.is-loading,
+:root:not([data-theme="dark"]) .spy-config-status.is-loading { color: var(--page-muted); }
+
+:root:not([data-theme="dark"]) .skeleton-line {
+  background: linear-gradient(90deg, #e6ebf3, #f8fafc, #e6ebf3);
+}
 
 @media (max-width: 720px) {
   .site-header { border-bottom-color: var(--page-line); }
@@ -1576,6 +1766,12 @@ input:focus, textarea:focus, select:focus, .channel-select:focus, .member-select
 :root[data-theme="dark"] .music-queue-art { background: linear-gradient(145deg, #202d55, #123244); }
 :root[data-theme="dark"] .spy-game-hero,
 :root[data-theme="dark"] .roulette-game-hero { background: linear-gradient(110deg, #17253b, #111d30); }
+:root[data-theme="dark"] .music-now-playing,
+:root[data-theme="dark"] .music-queue-section {
+  border-color: var(--page-line);
+  background: #111d30;
+  color: var(--page-ink);
+}
 
 /* Form controls must remain distinct from their surrounding panels. */
 :root[data-theme="dark"] input,
@@ -1725,3 +1921,573 @@ input:focus, textarea:focus, select:focus, .channel-select:focus, .member-select
 :root[data-theme="dark"] .music-warning { border-color: #6e5816; background: var(--page-warning-soft); color: var(--page-warning); }
 :root[data-theme="dark"] .help-warning p,
 :root[data-theme="dark"] .help-warning strong { color: var(--page-warning); }
+
+/* Avoid laying out and painting long lists all at once. Visible/focused rows
+   remain interactive while content far below the fold is deferred by the
+   browser. */
+.server-card,
+.command-card,
+.portal-choice-card,
+.member-row,
+.ticket-record-card,
+.guild-log-event,
+.music-card,
+.music-track-row,
+.music-queue-item,
+.game-catalog-card,
+.help-section {
+  content-visibility: auto;
+  contain-intrinsic-size: 1px 150px;
+}
+html.is-tab-hidden .ambient-background *,
+html.is-tab-hidden .halo,
+html.is-tab-hidden .loading-spinner,
+html.is-tab-hidden .button-spinner { animation-play-state: paused !important; }
+
+/* Keep the decorative layer inexpensive during scroll and pointer movement.
+   These shapes are atmosphere only, so they do not need a continuously
+   animated compositor layer. Removing the motion and full-screen blend pass
+   avoids a steady paint workload on lower-power hosts while preserving the
+   same shapes, gradients, and theme colours. */
+.noise { display: none !important; }
+body { background: var(--page-bg) !important; }
+.halo { opacity: .48; }
+.ambient-box,
+.ambient-shape,
+.ambient-bird { animation: none !important; }
+.ambient-box { box-shadow: inset 0 1px rgba(255, 255, 255, .16); }
+.ambient-shape-diamond { transform: rotate(45deg); }
+.ambient-shape-pill { transform: rotate(-24deg); }
+.ambient-bird { transform: none; }
+
+/* Long lists are common in the members, logs, and music views. A border is
+   enough separation for these repeated rows; eliminating dozens of shadow
+   blur regions substantially lowers paint cost while scrolling. */
+.member-row,
+.guild-log-event,
+.music-track-row,
+.music-queue-item { box-shadow: none !important; }
+.member-row,
+.guild-log-event,
+.music-track-row,
+.music-queue-item { transition: none !important; }
+.member-row:hover,
+.music-track-row:hover,
+.music-queue-item:hover { box-shadow: none !important; }
+
+/* Dark-mode surface audit. Some feature panels are built dynamically and
+   receive their light-mode background in a later, page-specific rule. Keep a
+   final dark palette for those nested forms and rows so profile, tickets,
+   logs, Temp VC, roles, and auto-react never fall back to white. */
+:root[data-theme="dark"] .bot-profile-panel,
+:root[data-theme="dark"] .bot-settings-panel,
+:root[data-theme="dark"] .profile-form,
+:root[data-theme="dark"] .profile-avatar-editor,
+:root[data-theme="dark"] .profile-preview,
+:root[data-theme="dark"] .role-permissions-panel,
+:root[data-theme="dark"] .role-permission-group,
+:root[data-theme="dark"] .role-permission-option,
+:root[data-theme="dark"] .commands-settings-toolbar,
+:root[data-theme="dark"] .command-settings-summary,
+:root[data-theme="dark"] .auto-react-rules,
+:root[data-theme="dark"] .auto-react-list,
+:root[data-theme="dark"] .ticket-config-section,
+:root[data-theme="dark"] .ticket-layout-field,
+:root[data-theme="dark"] .ticket-option-row,
+:root[data-theme="dark"] .ticket-panel-preview,
+:root[data-theme="dark"] .ticket-role-menu,
+:root[data-theme="dark"] .ticket-log-row,
+:root[data-theme="dark"] .ticket-log-id-control,
+:root[data-theme="dark"] .guild-log-category-grid,
+:root[data-theme="dark"] .guild-log-category,
+:root[data-theme="dark"] .guild-log-row,
+:root[data-theme="dark"] .temp-vc-config-form,
+:root[data-theme="dark"] .temp-vc-room-controls,
+:root[data-theme="dark"] .temp-vc-tool,
+:root[data-theme="dark"] .spy-channel-picker,
+:root[data-theme="dark"] .spy-game-logs,
+:root[data-theme="dark"] .spy-game-log-row,
+:root[data-theme="dark"] .spy-lobby-status,
+:root[data-theme="dark"] .ban-list,
+:root[data-theme="dark"] .music-playlist-tracks {
+  border-color: var(--page-line) !important;
+  background: #111d30 !important;
+  color: var(--page-ink) !important;
+}
+
+:root[data-theme="dark"] .profile-avatar-editor,
+:root[data-theme="dark"] .temp-vc-config-form,
+:root[data-theme="dark"] .temp-vc-room-controls,
+:root[data-theme="dark"] .guild-logs-master,
+:root[data-theme="dark"] .spy-channel-picker,
+:root[data-theme="dark"] .role-permissions-panel,
+:root[data-theme="dark"] .role-permission-group {
+  background: #0d1829 !important;
+}
+
+:root[data-theme="dark"] .ticket-config-section:hover,
+:root[data-theme="dark"] .ticket-option-row:hover,
+:root[data-theme="dark"] .auto-react-row:hover,
+:root[data-theme="dark"] .automod-feature-option:hover,
+:root[data-theme="dark"] .guild-log-category:hover,
+:root[data-theme="dark"] .guild-log-row:hover,
+:root[data-theme="dark"] .spy-rule-card:hover,
+:root[data-theme="dark"] .music-track-row:hover,
+:root[data-theme="dark"] .music-queue-item:hover {
+  border-color: var(--page-line-strong) !important;
+  background: #17253b !important;
+}
+
+:root[data-theme="dark"] .profile-avatar-preview {
+  border-color: var(--page-line-strong);
+  background: linear-gradient(145deg, #25385a, #111d30);
+}
+:root[data-theme="dark"] .profile-avatar-fallback { color: var(--page-ink); }
+:root[data-theme="dark"] .music-queued-note,
+:root[data-theme="dark"] .music-queue-duration {
+  border-color: var(--page-line);
+  background: #16243a;
+  color: var(--page-muted);
+}
+:root[data-theme="dark"] .music-track-actions .music-small-button:disabled {
+  border-color: var(--page-line);
+  background: #16243a;
+  color: var(--page-subtle);
+}
+:root[data-theme="dark"] .ticket-role-check {
+  border-color: var(--page-line-strong);
+  color: var(--page-ink);
+}
+:root[data-theme="dark"] .ticket-role-option.is-selected .ticket-role-check {
+  border-color: var(--page-accent);
+  background: var(--page-accent);
+  color: #fff;
+}
+:root[data-theme="dark"] .profile-file-input::file-selector-button {
+  border: 1px solid var(--page-line-strong);
+  border-radius: 6px;
+  background: #16243a;
+  color: var(--page-ink);
+}
+:root[data-theme="dark"] .ticket-post,
+:root[data-theme="dark"] .spotify-button,
+:root[data-theme="dark"] .game-setup-button,
+:root[data-theme="dark"] .ban-command-card .command-button {
+  border-color: var(--page-accent);
+  background: var(--page-accent);
+  color: #fff;
+}
+:root[data-theme="dark"] .ticket-post:hover,
+:root[data-theme="dark"] .spotify-button:hover,
+:root[data-theme="dark"] .game-setup-button:hover,
+:root[data-theme="dark"] .ban-command-card .command-button:hover {
+  border-color: var(--page-accent-dark);
+  background: var(--page-accent-dark);
+  color: #fff;
+}
+
+/* Leveling dashboard and dedicated log-channel actions */
+.guild-log-category { grid-template-columns: 1.2rem minmax(0, 1fr) minmax(180px, 245px) auto; }
+.guild-log-create-channel { min-width: 7.8rem; padding: .62rem .72rem; font-size: .62rem; white-space: nowrap; }
+.level-panel { grid-column: 1 / -1; display: grid; gap: 1.25rem; width: 100%; max-width: 1050px; margin-top: 2.2rem; padding: clamp(1.1rem, 3vw, 2rem); border: 1px solid var(--page-line); border-radius: 20px; background: var(--page-surface); box-shadow: var(--page-shadow); color: var(--page-ink); }
+.level-heading { display: grid; gap: .4rem; padding-bottom: 1rem; border-bottom: 1px solid var(--page-line); }
+.level-title { margin: 0; color: var(--page-ink); font-size: clamp(1.35rem, 3vw, 2rem); letter-spacing: -.04em; }
+.level-copy, .level-form-hint { margin: 0; color: var(--page-muted); font-size: .8rem; line-height: 1.5; }
+.level-config-form { display: grid; gap: 1rem; }
+.level-enable-field { display: inline-flex; align-items: center; gap: .55rem; width: fit-content; padding: .6rem .75rem; border: 1px solid var(--page-line); border-radius: 10px; background: var(--page-surface-solid); color: var(--page-ink); font-weight: 600; }
+.level-enable-field input, .level-style-option input { accent-color: var(--page-accent); }
+.level-style-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .7rem; }
+.level-style-option { display: grid; grid-template-columns: auto 1fr; gap: .2rem .55rem; align-items: center; padding: .8rem; border: 1px solid var(--page-line); border-radius: 12px; background: var(--page-surface-solid); color: var(--page-ink); cursor: pointer; transition: border-color .18s ease, background .18s ease; }
+.level-style-option:has(input:checked) { border-color: var(--page-accent); background: var(--page-accent-soft); }
+.level-style-copy { font-weight: 700; }
+.level-style-description { grid-column: 2; color: var(--page-muted); font-size: .68rem; line-height: 1.4; }
+.level-form-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem; }
+.level-form-status { color: var(--page-muted); font: .65rem "DM Mono", monospace; }
+.level-form-status.is-success { color: var(--page-success); }
+.level-form-status.is-error { color: var(--page-danger); }
+.level-form-status.is-loading { color: var(--page-accent); }
+.level-form-hint { padding: .65rem .75rem; border-left: 3px solid var(--page-accent); background: var(--page-accent-soft); }
+.level-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .85rem; }
+.level-stat-card { min-width: 0; padding: .9rem; border: 1px solid var(--page-line); border-radius: 14px; background: var(--page-surface-solid); }
+.level-stat-card h4 { margin: 0 0 .65rem; color: var(--page-ink); font-size: .85rem; }
+.level-stat-list { display: grid; gap: .35rem; }
+.level-stat-row { display: grid; grid-template-columns: 2rem 30px minmax(0, 1fr); align-items: center; gap: .5rem; padding: .4rem .2rem; border-bottom: 1px solid var(--page-line); }
+.level-stat-row:last-child { border-bottom: 0; }
+.level-stat-rank { color: var(--page-accent); font: 700 .64rem "DM Mono", monospace; }
+.level-stat-avatar { width: 30px; height: 30px; border-radius: 50%; object-fit: cover; background: var(--page-line); }
+.level-stat-copy { display: grid; min-width: 0; gap: .12rem; }
+.level-stat-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--page-ink); font-size: .72rem; }
+.level-stat-copy small { color: var(--page-muted); font: .58rem "DM Mono", monospace; }
+.level-style-option input:disabled, .level-enable-field input:disabled { opacity: .6; }
+@media (max-width: 820px) { .level-stats { grid-template-columns: 1fr; } }
+@media (max-width: 720px) { .guild-log-category { grid-template-columns: 1.2rem minmax(0, 1fr) auto; }.guild-log-category-channel { grid-column: 2; width: 100%; }.guild-log-create-channel { grid-column: 3; grid-row: 1 / span 2; min-width: 0; }.level-style-grid { grid-template-columns: 1fr; } }
+
+/* Refined button language: compact rounded rectangles read as clear actions
+   on both themes while preserving the existing accent hierarchy. */
+.primary-button, .secondary-button, .danger-button, .add-bot-button {
+  min-height: 2.55rem;
+  border-radius: 11px;
+  padding: .72rem 1rem;
+  letter-spacing: .045em;
+  box-shadow: 0 7px 16px rgba(15, 23, 42, .12);
+}
+.primary-button:hover, .secondary-button:hover, .danger-button:hover, .add-bot-button:hover { transform: translateY(-2px); }
+.primary-button:active, .secondary-button:active, .danger-button:active, .add-bot-button:active { transform: translateY(0); }
+.primary-button:focus-visible, .secondary-button:focus-visible, .danger-button:focus-visible, .add-bot-button:focus-visible { outline: 3px solid color-mix(in srgb, var(--page-accent) 28%, transparent); outline-offset: 2px; }
+.level-panel .primary-button, .guild-logs-save { border-radius: 10px; padding-inline: 1.15rem; }
+.level-panel > .secondary-button { width: 100%; border-radius: 10px; }
+.guild-log-create-channel { min-height: 2.25rem; border-radius: 9px; padding: .58rem .78rem; font-size: .6rem; }
+.guild-log-create-channel:disabled { cursor: not-allowed; opacity: .55; transform: none; }
+
+/* Number streak dashboard card */
+.streak-panel { grid-column: 1 / -1; display: grid; gap: 1.15rem; width: 100%; max-width: 860px; margin-top: 2.2rem; padding: clamp(1.1rem, 3vw, 2rem); border: 1px solid var(--page-line); border-radius: 20px; background: var(--page-surface); box-shadow: var(--page-shadow); color: var(--page-ink); }
+.streak-heading { display: grid; gap: .42rem; padding-bottom: 1rem; border-bottom: 1px solid var(--page-line); }
+.streak-heading h3 { margin: 0; color: var(--page-ink); font-size: clamp(1.35rem, 3vw, 2rem); letter-spacing: -.04em; }
+.streak-copy, .streak-form-hint, .streak-state-copy { margin: 0; color: var(--page-muted); font-size: .8rem; line-height: 1.5; }
+.streak-status { width: fit-content; padding: .3rem .55rem; border: 1px solid var(--page-line); border-radius: 999px; background: var(--page-surface-solid); color: var(--page-muted); font: 600 .58rem "DM Mono", monospace; letter-spacing: .06em; text-transform: uppercase; }
+.streak-status.is-enabled { border-color: #28734f; background: var(--page-success-soft); color: var(--page-success); }
+.streak-config-form { display: grid; gap: 1rem; }
+.streak-enable-field { display: inline-flex; align-items: center; gap: .55rem; width: fit-content; padding: .6rem .75rem; border: 1px solid var(--page-line); border-radius: 10px; background: var(--page-accent-soft); color: var(--page-ink); font-weight: 700; }
+.streak-enable-field input { accent-color: var(--page-accent); }
+.streak-form-hint { padding: .7rem .8rem; border-left: 3px solid var(--page-accent); background: var(--page-accent-soft); }
+.streak-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem; }
+.streak-form-status { color: var(--page-muted); font: .65rem "DM Mono", monospace; }
+.streak-form-status.is-success { color: var(--page-success); }
+.streak-form-status.is-error { color: var(--page-danger); }
+.streak-form-status.is-loading { color: var(--page-accent); }
+.streak-state { display: grid; gap: .35rem; padding: 1rem; border: 1px solid var(--page-line); border-radius: 14px; background: var(--page-surface-solid); }
+.streak-state h4 { margin: 0; color: var(--page-muted); font: 600 .62rem "DM Mono", monospace; letter-spacing: .08em; text-transform: uppercase; }
+.streak-next-number { color: var(--page-accent-dark); font-size: 1.15rem; }
+.streak-panel > .secondary-button { width: 100%; }
+@supports not (color: color-mix(in srgb, black, white)) {
+  .primary-button:focus-visible, .secondary-button:focus-visible, .danger-button:focus-visible, .add-bot-button:focus-visible { outline-color: rgba(129, 140, 248, .35); }
+}
+
+/* Final control pass -----------------------------------------------------
+   Native selects inherit the operating system's bright menu in some browsers.
+   Give every dashboard picker the same compact surface and arrow treatment. */
+select.channel-select,
+.spy-channel-select,
+select.spy-config-input,
+.level-panel select,
+.automod-settings-card select,
+.temp-vc-panel select {
+  appearance: none;
+  -webkit-appearance: none;
+  min-height: 2.65rem;
+  padding-right: 2.35rem !important;
+  border-color: var(--page-line-strong);
+  background-color: var(--page-surface-solid);
+  background-image: linear-gradient(45deg, transparent 50%, var(--page-muted) 50%), linear-gradient(135deg, var(--page-muted) 50%, transparent 50%);
+  background-position: calc(100% - 1rem) 50%, calc(100% - .7rem) 50%;
+  background-size: .34rem .34rem, .34rem .34rem;
+  background-repeat: no-repeat;
+  color: var(--page-ink);
+}
+select.channel-select:focus,
+.spy-channel-select:focus,
+select.spy-config-input:focus,
+.level-panel select:focus,
+.automod-settings-card select:focus,
+.temp-vc-panel select:focus {
+  border-color: var(--page-accent);
+  outline: 3px solid color-mix(in srgb, var(--page-accent) 18%, transparent);
+  outline-offset: 1px;
+}
+option { background: var(--page-surface-solid); color: var(--page-ink); }
+:root[data-theme="dark"] select { color-scheme: dark; }
+:root:not([data-theme="dark"]) select { color-scheme: light; }
+
+/* Level controls: the Classic XP field is conditionally shown by the panel
+   script, so non-Classic styles keep the form focused on relevant settings. */
+.level-style-grid { gap: .85rem; }
+.level-style-option { min-height: 5.2rem; align-content: center; }
+.level-style-option:hover { border-color: var(--page-accent); background: var(--page-accent-soft); }
+.level-style-option:has(input:checked) { box-shadow: 0 0 0 2px color-mix(in srgb, var(--page-accent) 18%, transparent); }
+
+/* Temp VC uses clear sections and consistent surfaces in both themes. */
+.temp-vc-panel { max-width: 1050px; margin-inline: auto; padding: clamp(1.15rem, 3vw, 1.8rem); background: var(--page-surface); color: var(--page-ink); }
+.temp-vc-config-form { gap: .9rem; padding: 1rem; border-color: var(--page-line); background: var(--page-surface-solid); }
+.temp-vc-enable-field { min-height: 2.7rem; padding: .55rem .7rem; border: 1px solid var(--page-line); border-radius: 10px; background: var(--page-accent-soft); color: var(--page-ink); font-weight: 700; }
+.temp-vc-enable-field input { accent-color: var(--page-accent); }
+.temp-vc-channel-list { gap: .85rem; }
+.temp-vc-channel-card { border-color: var(--page-line); background: var(--page-surface-solid); box-shadow: 0 8px 22px rgba(15, 23, 42, .08); }
+.temp-vc-channel-card:hover { border-color: var(--page-accent); transform: translateY(-2px); }
+.temp-vc-channel-marker { border-color: var(--page-line-strong); background: var(--page-accent-soft); color: var(--page-accent-dark); }
+.temp-vc-room-controls, .temp-vc-tool { border-color: var(--page-line); background: var(--page-surface); }
+.temp-vc-tool { padding: .55rem; border-radius: 10px; }
+.temp-vc-tool-label { color: var(--page-muted); }
+.temp-vc-member-controls { padding: .7rem; border: 1px solid var(--page-line); border-radius: 11px; background: var(--page-surface); }
+.temp-vc-member-controls .member-picker { min-width: 0; }
+
+/* Dropdown typography ----------------------------------------------------
+   Use the same proportional UI font for native and custom menus.  The old
+   monospace labels made long channel/member names wrap awkwardly and reduced
+   readability, especially in the dark theme. */
+select,
+option,
+.member-select-trigger,
+.member-option,
+.ticket-role-trigger,
+.ticket-role-option,
+.ticket-layout-choice,
+.level-style-option {
+  font-family: Outfit, Arial, sans-serif !important;
+  font-size: .8rem;
+  font-weight: 500;
+  letter-spacing: .01em;
+}
+select,
+.member-select-trigger,
+.ticket-role-trigger {
+  line-height: 1.35;
+}
+.member-option,
+.ticket-role-option {
+  line-height: 1.35;
+}
+:root[data-theme="dark"] option {
+  background: var(--page-surface-solid);
+  color: var(--page-ink);
+}
+
+/* Bilingual game instructions share the same emphasis treatment. */
+.spy-rule-card.is-primary { border-color: var(--page-accent); background: var(--page-accent-soft); box-shadow: 0 8px 20px color-mix(in srgb, var(--page-accent) 10%, transparent); }
+.spy-rule-card.is-primary .spy-rule-language { color: var(--page-accent-dark); }
+.spy-rule-card-ar { text-align: right; }
+.spy-rule-card-ar .spy-rule-language { letter-spacing: 0; text-transform: none; }
+
+/* Automod previously inherited bright card/input backgrounds from the light
+   layer. These final selectors keep every Automod surface in the dark palette. */
+:root[data-theme="dark"] .automod-settings-card,
+:root[data-theme="dark"] .automod-step,
+:root[data-theme="dark"] .automod-feature-grid,
+:root[data-theme="dark"] .automod-options-grid,
+:root[data-theme="dark"] .automod-feature-option,
+:root[data-theme="dark"] .automod-rule-group,
+:root[data-theme="dark"] .automod-words-input,
+:root[data-theme="dark"] .automod-number-input,
+:root[data-theme="dark"] .automod-timeout-unit {
+  border-color: var(--page-line) !important;
+  background-color: #111d30 !important;
+  color: var(--page-ink) !important;
+}
+:root[data-theme="dark"] .automod-feature-grid,
+:root[data-theme="dark"] .automod-options-grid {
+  border-color: transparent !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+:root[data-theme="dark"] .automod-feature-option:hover,
+:root[data-theme="dark"] .automod-feature-option.is-selected,
+:root[data-theme="dark"] .automod-rule-group:hover {
+  border-color: var(--page-accent) !important;
+  background-color: #17253b !important;
+}
+:root[data-theme="dark"] .automod-feature-copy strong,
+:root[data-theme="dark"] .automod-step-header,
+:root[data-theme="dark"] .automod-settings-copy strong,
+:root[data-theme="dark"] .automod-rule-group > strong { color: var(--page-ink) !important; }
+:root[data-theme="dark"] .automod-settings-copy p,
+:root[data-theme="dark"] .automod-step-description,
+:root[data-theme="dark"] .automod-feature-copy small,
+:root[data-theme="dark"] .automod-tuning-empty { color: var(--page-muted) !important; }
+:root[data-theme="dark"] .automod-master-toggle input,
+:root[data-theme="dark"] .automod-feature-option input { accent-color: var(--page-accent); }
+
+@media (max-width: 720px) {
+  .temp-vc-room-controls { grid-template-columns: 1fr; }
+  .temp-vc-tool { padding: .65rem; }
+  .temp-vc-member-controls { grid-template-columns: 1fr; }
+  .temp-vc-member-heading, .temp-vc-target-picker { grid-column: auto; }
+}
+
+/* Member Profile portal --------------------------------------------------- */
+.portal-profile-card { border-color: var(--page-accent); }
+.portal-profile-card:hover { border-color: var(--page-accent-dark); }
+.member-profile-view { padding: clamp(2.5rem, 7vw, 5.5rem) 0 6rem; }
+.member-profile-shell { display: grid; gap: 1.25rem; width: min(100%, 980px); margin: 0 auto; }
+.member-profile-heading { display: grid; gap: .5rem; }
+.member-profile-title { margin: 0; color: var(--page-ink); font-size: clamp(2.5rem, 7vw, 5rem); letter-spacing: -.07em; line-height: .95; }
+.member-profile-copy { max-width: 62ch; margin: 0; color: var(--page-muted); font-size: 1rem; line-height: 1.55; }
+.member-profile-hero { display: flex; align-items: center; gap: 1rem; padding: clamp(1.1rem, 3vw, 1.5rem); border: 1px solid var(--page-line); border-radius: 20px; background: linear-gradient(120deg, var(--page-surface-solid), var(--page-accent-soft)); box-shadow: var(--page-shadow); }
+.member-profile-avatar { display: grid; place-items: center; width: 72px; height: 72px; flex: 0 0 72px; overflow: hidden; border: 3px solid var(--page-surface-solid); border-radius: 22px; background: var(--page-accent); color: #fff; box-shadow: 0 8px 22px rgba(79, 70, 229, .2); }
+.member-profile-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.member-profile-avatar-fallback { font-size: 1.8rem; font-weight: 800; }
+.member-profile-identity { min-width: 0; }
+.member-profile-name { margin: 0 0 .25rem; overflow: hidden; color: var(--page-ink); font-size: 1.35rem; text-overflow: ellipsis; white-space: nowrap; }
+.member-profile-id { margin: 0; color: var(--page-muted); font: .68rem "DM Mono", monospace; overflow-wrap: anywhere; }
+.member-profile-server-badge { margin-left: auto; padding: .5rem .7rem; border: 1px solid var(--page-line-strong); border-radius: 999px; background: var(--page-surface-solid); color: var(--page-accent-dark); font: 500 .65rem "DM Mono", monospace; white-space: nowrap; }
+.member-profile-stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .8rem; }
+.member-profile-stat { display: grid; gap: .4rem; min-width: 0; padding: 1rem; border: 1px solid var(--page-line); border-radius: 16px; background: var(--page-surface); box-shadow: var(--page-shadow); }
+.member-profile-stat-featured { border-color: color-mix(in srgb, var(--page-accent) 46%, var(--page-line)); background: var(--page-accent-soft); }
+.member-profile-stat-label { color: var(--page-muted); font: 600 .62rem "DM Mono", monospace; letter-spacing: .07em; text-transform: uppercase; }
+.member-profile-stat-value { overflow: hidden; color: var(--page-ink); font-size: clamp(1.1rem, 2.4vw, 1.55rem); line-height: 1.12; text-overflow: ellipsis; white-space: nowrap; }
+.member-profile-stat-featured .member-profile-stat-value { color: var(--page-accent-dark); font-size: 1rem; }
+.member-profile-stat-hint { color: var(--page-muted); font-size: .7rem; line-height: 1.35; }
+.member-profile-servers { display: grid; gap: .85rem; padding: clamp(1rem, 3vw, 1.4rem); border: 1px solid var(--page-line); border-radius: 20px; background: var(--page-surface); box-shadow: var(--page-shadow); }
+.member-profile-section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; padding-bottom: .75rem; border-bottom: 1px solid var(--page-line); }
+.member-profile-section-heading h3 { margin: 0; color: var(--page-ink); font-size: 1.05rem; }
+.member-profile-section-heading span { color: var(--page-muted); font: .65rem "DM Mono", monospace; }
+.member-profile-server-list { display: grid; gap: .55rem; }
+.member-profile-server-row { display: grid; grid-template-columns: 2rem 42px minmax(0, 1fr); align-items: center; gap: .7rem; padding: .65rem .7rem; border: 1px solid var(--page-line); border-radius: 13px; background: var(--page-surface-solid); }
+.member-profile-rank { color: var(--page-accent-dark); font: 600 .7rem "DM Mono", monospace; text-align: center; }
+.member-profile-server-icon { display: grid; place-items: center; width: 42px; height: 42px; overflow: hidden; border-radius: 12px; background: var(--page-accent-soft); color: var(--page-accent-dark); font-weight: 800; }
+.member-profile-server-icon img { width: 100%; height: 100%; object-fit: cover; }
+.member-profile-server-fallback { font-size: 1rem; }
+.member-profile-server-copy { display: grid; gap: .3rem; min-width: 0; }
+.member-profile-server-copy strong { overflow: hidden; color: var(--page-ink); font-size: .85rem; text-overflow: ellipsis; white-space: nowrap; }
+.member-profile-server-copy small { overflow: hidden; color: var(--page-muted); font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
+.member-profile-activity-bar { height: 5px; overflow: hidden; border-radius: 999px; background: var(--page-line); }
+.member-profile-activity-bar span { display: block; height: 100%; min-width: 0; border-radius: inherit; background: linear-gradient(90deg, var(--page-accent), var(--page-accent-dark)); }
+.member-profile-empty { margin: 0; padding: 1.5rem; border: 1px dashed var(--page-line-strong); border-radius: 12px; color: var(--page-muted); text-align: center; }
+.member-profile-back { justify-self: start; }
+@media (max-width: 820px) { .member-profile-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) {
+  .member-profile-hero { align-items: flex-start; flex-wrap: wrap; }
+  .member-profile-server-badge { margin-left: 0; }
+  .member-profile-stat-grid { grid-template-columns: 1fr; }
+  .member-profile-server-row { grid-template-columns: 1.6rem 38px minmax(0, 1fr); gap: .5rem; }
+  .member-profile-server-icon { width: 38px; height: 38px; }
+}
+
+/* Header actions, patch notes, and subtle build marker ------------------- */
+.header-primary { flex-wrap: wrap; }
+.header-action-button { white-space: nowrap; }
+.header-add-bot {
+  border-color: var(--page-accent);
+  background: var(--page-accent);
+  color: #fff;
+  box-shadow: 0 7px 16px rgba(79, 70, 229, .16);
+}
+.header-add-bot:hover,
+.header-add-bot:focus-visible {
+  border-color: var(--page-accent-dark);
+  background: var(--page-accent-dark);
+  color: #fff;
+  transform: translateY(-2px);
+}
+.patch-button {
+  border-color: var(--page-line-strong);
+  background: var(--page-accent-soft);
+  color: var(--page-accent-dark);
+}
+.patch-button:hover,
+.patch-button:focus-visible {
+  border-color: var(--page-accent);
+  background: var(--page-accent);
+  color: #fff;
+  transform: translateY(-2px);
+}
+/* The dark theme has a more specific support-button rule earlier in this
+   stylesheet; keep these two new actions visually distinct there as well. */
+:root[data-theme="dark"] .header-add-bot {
+  border-color: var(--page-accent);
+  background: var(--page-accent);
+  color: #101827;
+}
+:root[data-theme="dark"] .header-add-bot:hover,
+:root[data-theme="dark"] .header-add-bot:focus-visible {
+  border-color: var(--page-accent-dark);
+  background: var(--page-accent-dark);
+  color: #101827;
+}
+:root[data-theme="dark"] .patch-button {
+  border-color: var(--page-line-strong);
+  background: var(--page-accent-soft);
+  color: var(--page-accent-dark);
+}
+:root[data-theme="dark"] .patch-button:hover,
+:root[data-theme="dark"] .patch-button:focus-visible {
+  border-color: var(--page-accent);
+  background: var(--page-accent);
+  color: #101827;
+}
+.site-version {
+  position: fixed;
+  right: 1rem;
+  bottom: .7rem;
+  z-index: 1;
+  color: var(--page-muted);
+  font: 500 .56rem/1 "DM Mono", monospace;
+  letter-spacing: .08em;
+  opacity: .42;
+  pointer-events: none;
+  user-select: none;
+}
+.patch-modal { z-index: 7; }
+.patch-modal-card {
+  width: min(100%, 620px);
+  padding: clamp(1.35rem, 4vw, 2.25rem);
+  border-color: var(--page-line);
+  background: var(--page-surface);
+  color: var(--page-ink);
+}
+.patch-modal-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: .8rem;
+}
+.patch-modal-topline .eyebrow { margin: 0; }
+.patch-version {
+  padding: .32rem .55rem;
+  border: 1px solid var(--page-line-strong);
+  border-radius: 999px;
+  background: var(--page-accent-soft);
+  color: var(--page-accent-dark);
+  font: 600 .62rem "DM Mono", monospace;
+  letter-spacing: .05em;
+}
+.patch-modal-card h2 {
+  margin: 0 0 .45rem;
+  color: var(--page-ink);
+  font-size: clamp(2rem, 5vw, 3rem);
+}
+.patch-list {
+  display: grid;
+  gap: .7rem;
+  margin: 1.3rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.patch-list li {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  gap: .75rem;
+  align-items: start;
+  padding: .8rem;
+  border: 1px solid var(--page-line);
+  border-radius: 13px;
+  background: var(--page-surface-solid);
+}
+.patch-list-marker {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 9px;
+  background: var(--page-accent-soft);
+  color: var(--page-accent-dark);
+  font: 600 .64rem "DM Mono", monospace;
+}
+.patch-list strong { display: block; color: var(--page-ink); font-size: .86rem; }
+.patch-list p { margin: .18rem 0 0; color: var(--page-muted); font-size: .74rem; line-height: 1.45; }
+.patch-modal-footnote {
+  margin: 1.2rem 0 0;
+  color: var(--page-muted);
+  font: 500 .62rem "DM Mono", monospace;
+  letter-spacing: .05em;
+}
+@media (max-width: 720px) {
+  .site-header { align-items: flex-start; flex-wrap: wrap; }
+  .header-primary { flex: 1 1 auto; gap: .45rem; }
+  .header-actions { flex: 0 0 auto; gap: .45rem; }
+  .header-primary .support-button { padding: .42rem .5rem; font-size: .56rem; }
+}
+@media (max-width: 520px) {
+  .header-primary .help-button { display: none; }
+  .header-action-button { padding: .42rem .5rem; }
+  .site-version { right: .65rem; bottom: .5rem; }
+}

@@ -45,6 +45,14 @@
 
   applyTheme(root.dataset.theme || readTheme());
 
+  function syncVisibility() {
+    // Pause decorative motion while the tab is backgrounded. This avoids
+    // needless compositor work and lets the page resume without a busy loop.
+    root.classList.toggle("is-tab-hidden", document.hidden);
+  }
+  syncVisibility();
+  document.addEventListener("visibilitychange", syncVisibility);
+
   document.addEventListener("click", (event) => {
     const button = event.target.closest("#theme-toggle");
     if (!button) return;

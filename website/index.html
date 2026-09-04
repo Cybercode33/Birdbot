@@ -3,16 +3,18 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="BirdBot Discord server dashboard." />
+    <meta name="description" content="BirdBot Discord server dashboard and member profile." />
     <title>BirdBot</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <script>
       try {
         const savedTheme = localStorage.getItem("birdbot-theme");
         if (savedTheme === "dark" || savedTheme === "light") document.documentElement.dataset.theme = savedTheme;
       } catch (_) {}
     </script>
-    <link rel="stylesheet" href="/assets/styles.css?v=ui88" />
-    <script src="/assets/theme.js?v=theme1" defer></script>
+    <link rel="stylesheet" href="/assets/styles.css?v=ui107" />
+    <script src="/assets/theme.js?v=theme2" defer></script>
   </head>
   <body class="is-preloading">
     <div class="noise" aria-hidden="true"></div>
@@ -35,6 +37,8 @@
       <div class="header-primary">
         <a class="brand" href="/">Bird<span>Bot</span></a>
         <a class="support-button" href="/support">Contact the Support</a>
+        <a class="support-button header-action-button header-add-bot" href="/add-bot">Add Bot</a>
+        <button id="patch-button" class="support-button header-action-button patch-button" type="button" aria-haspopup="dialog" aria-controls="patch-modal" aria-expanded="false">Patch</button>
         <a class="support-button help-button" href="/how-to-use">How to use the bot</a>
       </div>
       <div class="header-actions">
@@ -67,8 +71,12 @@
       <section id="portal-choice-view" class="portal-choice-view" hidden aria-labelledby="portal-choice-title">
         <p class="eyebrow"><span></span> Choose your BirdBot portal</p>
         <h2 id="portal-choice-title">Where do you want to go?</h2>
-        <p id="portal-choice-copy" class="tagline">Manage your servers or open the member music player.</p>
+        <p id="portal-choice-copy" class="tagline">Manage your servers or review your BirdBot activity profile.</p>
         <div id="portal-choice-grid" class="portal-choice-grid"></div>
+      </section>
+
+      <section id="profile-view" class="member-profile-view" hidden aria-labelledby="profile-title">
+        <div id="profile-portal-content"></div>
       </section>
 
       <section id="dashboard-view" class="dashboard-view" hidden aria-labelledby="dashboard-title">
@@ -110,6 +118,8 @@
         </div>
       </section>
     </main>
+
+    <div class="site-version" aria-label="Version 1.0">Version 1.0</div>
 
     <div id="selector-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="selector-title">
       <section class="modal-card">
@@ -162,11 +172,37 @@
       </section>
     </div>
 
+    <div id="patch-modal" class="modal patch-modal" hidden role="dialog" aria-modal="true" aria-labelledby="patch-title">
+      <section class="modal-card patch-modal-card">
+        <button class="close-button" data-close-modal type="button" aria-label="Close patch notes">&times;</button>
+        <div class="patch-modal-topline">
+          <p class="eyebrow"><span></span> Latest updates</p>
+          <span class="patch-version">v1.0</span>
+        </div>
+        <h2 id="patch-title">Patch notes</h2>
+        <p class="modal-copy">A quick look at the latest BirdBot improvements.</p>
+        <ol class="patch-list">
+          <li>
+            <span class="patch-list-marker">01</span>
+            <div><strong>Level profiles</strong><p>Member activity, ranks, and progress now have a clearer, theme-matched profile view.</p></div>
+          </li>
+          <li>
+            <span class="patch-list-marker">02</span>
+            <div><strong>Arabic game support</strong><p>Spy, Roulette, and level-up experiences now keep English and Arabic copy readable and correctly aligned.</p></div>
+          </li>
+          <li>
+            <span class="patch-list-marker">03</span>
+            <div><strong>Theme and performance polish</strong><p>Dark and light mode colors, controls, loading states, and navigation received a smoother visual refresh.</p></div>
+          </li>
+        </ol>
+        <p class="patch-modal-footnote">Version 1.0 &middot; September 2026</p>
+      </section>
+    </div>
+
     <script src="/assets/tickets/ticket-panel.js?v=tickets24"></script>
-    <script src="/assets/music/music-panel.js?v=music19"></script>
-    <script src="/assets/games/roulette-game.js?v=roulette10"></script>
-    <script src="/assets/games/spy-game.js?v=games12"></script>
-    <script src="/assets/games/guess-number-game.js?v=guess2"></script>
-    <script src="/assets/script.js?v=ui74"></script>
+    <script src="/assets/games/roulette-game.js?v=roulette13"></script>
+    <script src="/assets/games/spy-game.js?v=games15"></script>
+    <script src="/assets/games/guess-number-game.js?v=guess5"></script>
+    <script src="/assets/script.js?v=ui107"></script>
   </body>
 </html>

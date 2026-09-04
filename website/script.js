@@ -3,6 +3,8 @@ const portalChoiceView = document.getElementById("portal-choice-view");
 const portalChoiceGrid = document.getElementById("portal-choice-grid");
 const portalChoiceTitle = document.getElementById("portal-choice-title");
 const portalChoiceCopy = document.getElementById("portal-choice-copy");
+const profileView = document.getElementById("profile-view");
+const profilePortalContent = document.getElementById("profile-portal-content");
 const dashboardView = document.getElementById("dashboard-view");
 const welcomeMessage = document.getElementById("welcome-message");
 const botNotice = document.getElementById("bot-notice");
@@ -12,6 +14,8 @@ const selectorModal = document.getElementById("selector-modal");
 const confirmModal = document.getElementById("confirm-modal");
 const membersModal = document.getElementById("members-modal");
 const actionModal = document.getElementById("action-modal");
+const patchModal = document.getElementById("patch-modal");
+const patchButton = document.getElementById("patch-button");
 const actionModalTitle = document.getElementById("action-modal-title");
 const actionModalCopy = document.getElementById("action-modal-copy");
 const actionModalFields = document.getElementById("action-modal-fields");
@@ -41,11 +45,6 @@ const ticketLogsButton = document.getElementById("ticket-logs-button") || docume
 const commandGrid = document.getElementById("command-grid");
 const commandFeedback = document.getElementById("command-feedback");
 
-// Music is a separate member portal, not an administrative dashboard tab.
-// Remove the legacy tab as well so browsers serving an older cached HTML
-// document cannot display it after the dashboard has been updated.
-document.querySelectorAll('[data-management-tab="music"]').forEach((button) => button.remove());
-
 let dashboardData = null;
 let selectedGuild = null;
 let pendingAction = "enable";
@@ -57,11 +56,10 @@ const GET_REQUEST_ATTEMPTS = 2;
 let managementData = null;
 let membersPanelGuild = null;
 let membersPanelRecords = [];
+let membersSearchTimer = null;
 let currentUser = null;
 let ticketPageMode = "config";
 let activeManagementTab = "commands";
-let musicPortalMode = false;
-let musicInitialOverview = null;
 let actionModalResolver = null;
 let ticketCountdownTimer = null;
 let ticketRefreshInFlight = false;
@@ -79,6 +77,10 @@ let tempVCRefreshPending = false;
 // Responses fetched by the readiness gate are reused by the first render so
 // navigation never performs the same Discord/Spotify request twice.
 const preloadCache = new Map();
+// Several panels can ask for the same resource while a navigation or tab
+// switch is still settling. Share that in-flight promise instead of opening
+// duplicate HTTP connections and making the UI wait on redundant work.
+const requestInFlight = new Map();
 
 function textElement(tag, className, text) {
   const element = document.createElement(tag);
@@ -149,6 +151,7 @@ function renderAccount(user) {
     const avatar = document.createElement("img");
     avatar.src = user.avatar;
     avatar.alt = "";
+    avatar.decoding = "async";
     authArea.append(avatar);
   }
   authArea.append(textElement("span", "account-name", user.name));
@@ -191,55 +194,155 @@ function renderPortalCard(title, description, href, className) {
 }
 
 function renderPortalChoice(notice = "") {
-  if (window.BirdBotMusic?.unmount) window.BirdBotMusic.unmount();
-  musicPortalMode = false;
   landingView.hidden = true;
   dashboardView.hidden = true;
   managementView.hidden = true;
+  if (profileView) profileView.hidden = true;
   portalChoiceView.hidden = false;
   backButton.hidden = true;
   portalChoiceTitle.textContent = "Where do you want to go?";
-  portalChoiceCopy.textContent = notice || "Choose server management or open the member music player.";
+  portalChoiceCopy.textContent = notice || "Choose server management or review your BirdBot activity profile.";
   portalChoiceGrid.replaceChildren(
     renderPortalCard("The Dashboard", "Manage servers, tickets, commands, logs, and settings as an owner or Administrator.", "/?dashboard=1", "portal-dashboard-card"),
-    renderPortalCard("Music System", "Paste a public audio link or use Spotify, then control playback as an authenticated member.", "/?music=1", "portal-music-card"),
+    renderPortalCard("Profile", "Review your messages, shared images, voice time, and the servers where you are most active.", "/?profile=1", "portal-profile-card"),
   );
 }
 
-async function loadMusicGuildChoice() {
-  if (window.BirdBotMusic?.unmount) window.BirdBotMusic.unmount();
-  beginLoading("Loading your music servers...");
+function profileNumber(value) {
+  return Number(value || 0).toLocaleString();
+}
+
+function profileVoiceHours(seconds) {
+  const hours = Number(seconds || 0) / 3600;
+  if (!Number.isFinite(hours) || hours <= 0) return "0 h";
+  return `${hours < 10 ? hours.toFixed(1) : Math.round(hours).toLocaleString()} h`;
+}
+
+function renderProfileStat(label, value, hint, className = "") {
+  const card = document.createElement("article");
+  card.className = `member-profile-stat${className ? ` ${className}` : ""}`;
+  card.append(textElement("span", "member-profile-stat-label", label), textElement("strong", "member-profile-stat-value", value), textElement("small", "member-profile-stat-hint", hint));
+  return card;
+}
+
+function renderMemberProfile(data) {
+  if (!profilePortalContent) return;
+  const user = data?.user || currentUser || {};
+  const stats = data?.stats || {};
+  const servers = Array.isArray(data?.servers) ? data.servers : [];
+  const mostActive = data?.most_active_server || null;
+  profilePortalContent.replaceChildren();
+
+  const shell = document.createElement("div");
+  shell.className = "member-profile-shell";
+  const heading = document.createElement("div");
+  heading.className = "member-profile-heading";
+  const profileTitle = textElement("h2", "member-profile-title", `${user.name || "Your"} activity`);
+  profileTitle.id = "profile-title";
+  heading.append(
+    textElement("p", "eyebrow", "Member profile"),
+    profileTitle,
+    textElement("p", "member-profile-copy", "A clear snapshot of the activity BirdBot has recorded across your shared servers."),
+  );
+
+  const hero = document.createElement("section");
+  hero.className = "member-profile-hero";
+  const avatar = document.createElement("div");
+  avatar.className = "member-profile-avatar";
+  if (user.avatar) {
+    const image = document.createElement("img");
+    image.src = user.avatar;
+    image.alt = "";
+    image.loading = "eager";
+    image.decoding = "async";
+    image.addEventListener("error", () => {
+      avatar.replaceChildren(textElement("span", "member-profile-avatar-fallback", String(user.name || "B").charAt(0).toUpperCase()));
+    });
+    avatar.append(image);
+  } else {
+    avatar.append(textElement("span", "member-profile-avatar-fallback", String(user.name || "B").charAt(0).toUpperCase()));
+  }
+  const identity = document.createElement("div");
+  identity.className = "member-profile-identity";
+  identity.append(
+    textElement("h3", "member-profile-name", user.name || "Discord member"),
+    textElement("p", "member-profile-id", user.id ? `Discord ID · ${user.id}` : "Discord member"),
+  );
+  const serverBadge = textElement("span", "member-profile-server-badge", `${profileNumber(stats.server_count)} server${Number(stats.server_count || 0) === 1 ? "" : "s"}`);
+  hero.append(avatar, identity, serverBadge);
+
+  const statGrid = document.createElement("div");
+  statGrid.className = "member-profile-stat-grid";
+  statGrid.append(
+    renderProfileStat("Messages sent", profileNumber(stats.messages), "Human messages recorded"),
+    renderProfileStat("Images shared", profileNumber(stats.images), "Image attachments shared"),
+    renderProfileStat("Voice time", profileVoiceHours(stats.voice_seconds), "Time spent in voice calls"),
+    renderProfileStat("Most active server", mostActive?.name || "No activity yet", mostActive ? `${profileNumber(mostActive.messages)} messages here` : "Activity appears as you chat", "member-profile-stat-featured"),
+  );
+
+  const serverSection = document.createElement("section");
+  serverSection.className = "member-profile-servers";
+  const serverHeader = document.createElement("div");
+  serverHeader.className = "member-profile-section-heading";
+  serverHeader.append(textElement("h3", "", "Activity by server"), textElement("span", "", `${profileNumber(servers.length)} tracked`));
+  const list = document.createElement("div");
+  list.className = "member-profile-server-list";
+  if (!servers.length) {
+    list.append(textElement("p", "member-profile-empty", "No activity has been recorded yet. Start chatting in a shared server and this profile will update automatically."));
+  } else {
+    const maxMessages = Math.max(1, ...servers.map((server) => Number(server.messages || 0)));
+    servers.forEach((server, index) => {
+      const row = document.createElement("article");
+      row.className = "member-profile-server-row";
+      const rank = textElement("span", "member-profile-rank", `#${index + 1}`);
+      const icon = document.createElement("div");
+      icon.className = "member-profile-server-icon";
+      if (server.icon_url) {
+        const image = document.createElement("img");
+        image.src = server.icon_url;
+        image.alt = "";
+        image.loading = "lazy";
+        image.decoding = "async";
+        image.addEventListener("error", () => image.replaceWith(textElement("span", "member-profile-server-fallback", String(server.name || "?").charAt(0).toUpperCase())));
+        icon.append(image);
+      } else {
+        icon.append(textElement("span", "member-profile-server-fallback", String(server.name || "?").charAt(0).toUpperCase()));
+      }
+      const copy = document.createElement("div");
+      copy.className = "member-profile-server-copy";
+      copy.append(textElement("strong", "", server.name || "Unknown server"), textElement("small", "", `${profileNumber(server.messages)} messages · ${profileNumber(server.images)} images · ${profileVoiceHours(server.voice_seconds)} voice`));
+      const bar = document.createElement("div");
+      bar.className = "member-profile-activity-bar";
+      const fill = document.createElement("span");
+      fill.style.width = `${Math.min(100, Math.max(4, (Number(server.messages || 0) / maxMessages) * 100))}%`;
+      bar.append(fill);
+      copy.append(bar);
+      row.append(rank, icon, copy);
+      list.append(row);
+    });
+  }
+  serverSection.append(serverHeader, list);
+
+  const back = textElement("a", "secondary-button member-profile-back", "Back to portal");
+  back.href = "/?portal=1";
+  shell.append(heading, hero, statGrid, serverSection, back);
+  profilePortalContent.append(shell);
+}
+
+async function loadProfilePortal() {
+  beginLoading("Loading your Profile...");
   try {
-    const data = await requestJson("/api/music/guilds", { cache: "no-store" });
-    musicPortalMode = true;
+    const data = await requestJson("/api/profile", { cache: "no-store" });
+    renderAccount(data.user || currentUser);
     landingView.hidden = true;
     dashboardView.hidden = true;
     managementView.hidden = true;
-    portalChoiceView.hidden = false;
+    portalChoiceView.hidden = true;
+    if (profileView) profileView.hidden = false;
     backButton.hidden = false;
     backButton.href = "/?portal=1";
     backButton.textContent = "Back";
-    portalChoiceTitle.textContent = "Choose a server for Music System";
-    portalChoiceCopy.textContent = data.bot_online === false
-      ? "BirdBot is offline right now. Try again when the global bot is online."
-      : "Select a server where you are a member to open its player.";
-    portalChoiceGrid.replaceChildren();
-    const guilds = Array.isArray(data.guilds) ? data.guilds : [];
-    if (!guilds.length) {
-      portalChoiceGrid.append(textElement("p", "empty-state", data.bot_online === false ? "BirdBot is currently offline." : "No bot-connected servers are available for your account."));
-      return;
-    }
-    guilds.forEach((guild) => {
-      const card = renderPortalCard(guild.name, `${Number(guild.members || 0).toLocaleString()} members - ${guild.activated ? "Music enabled" : "Music disabled"}`, `/?guild=${encodeURIComponent(guild.id)}&music=1`, "portal-server-card");
-      if (guild.icon_url) {
-        const icon = document.createElement("img");
-        icon.className = "portal-choice-icon";
-        icon.src = guild.icon_url;
-        icon.alt = "";
-        card.prepend(icon);
-      }
-      portalChoiceGrid.append(card);
-    });
+    renderMemberProfile(data);
   } finally {
     endLoading();
   }
@@ -256,8 +359,21 @@ function closeModals() {
   selectorModal.hidden = true;
   confirmModal.hidden = true;
   if (membersModal) membersModal.hidden = true;
+  if (patchModal) patchModal.hidden = true;
+  if (patchButton) patchButton.setAttribute("aria-expanded", "false");
+  window.clearTimeout(membersSearchTimer);
+  membersSearchTimer = null;
   resolveActionModal(null);
   activationError.textContent = "";
+}
+
+if (patchButton && patchModal) {
+  patchButton.addEventListener("click", () => {
+    closeModals();
+    patchModal.hidden = false;
+    patchButton.setAttribute("aria-expanded", "true");
+    window.requestAnimationFrame(() => patchModal.querySelector(".close-button")?.focus());
+  });
 }
 
 function bindDurationPicker(amountInput, unitSelect) {
@@ -410,10 +526,10 @@ function canRetryReadRequest(error) {
   return Boolean(error?.retryable) || error instanceof TypeError || [429, 502, 503, 504].includes(status);
 }
 
-async function requestJson(url, options = {}) {
+async function requestJsonUncoalesced(url, options = {}) {
   const { skipPreload = false, ...fetchOptions } = options || {};
   const method = String(fetchOptions.method || "GET").toUpperCase();
-  // Any mutation can invalidate a preloaded dashboard/music snapshot (for
+  // Any mutation can invalidate a preloaded dashboard/profile snapshot (for
   // example a newly enabled guild or a changed playback state).
   if (method !== "GET") preloadCache.clear();
   if (!skipPreload && method === "GET" && preloadCache.has(url)) {
@@ -457,6 +573,23 @@ async function requestJson(url, options = {}) {
   throw lastError || new Error("The request could not be completed.");
 }
 
+function requestJson(url, options = {}) {
+  const method = String(options?.method || "GET").toUpperCase();
+  if (method !== "GET") return requestJsonUncoalesced(url, options);
+  const skipPreload = Boolean(options?.skipPreload);
+  const key = `${url}::${skipPreload ? "fresh" : "cached"}`;
+  const existing = requestInFlight.get(key);
+  if (existing) return existing;
+  const pending = requestJsonUncoalesced(url, options);
+  requestInFlight.set(key, pending);
+  pending.then(() => {
+    if (requestInFlight.get(key) === pending) requestInFlight.delete(key);
+  }, () => {
+    if (requestInFlight.get(key) === pending) requestInFlight.delete(key);
+  });
+  return pending;
+}
+
 async function preloadCriticalData() {
   loadingMessage.textContent = "Preparing your BirdBot workspace...";
   const session = await requestJson("/api/session", { cache: "no-store", skipPreload: true });
@@ -467,15 +600,11 @@ async function preloadCriticalData() {
   const guildId = parameters.get("guild");
   const urls = [];
   const requiredUrls = new Set();
-  const isMusic = parameters.get("music") === "1";
+  const isProfile = parameters.get("profile") === "1" || parameters.get("music") === "1";
   const isDashboard = parameters.get("dashboard") === "1";
-  if (isMusic) {
-    const musicOverviewUrl = guildId
-      ? `/api/guilds/${encodeURIComponent(guildId)}/music`
-      : "/api/music/guilds";
-    urls.push(musicOverviewUrl);
-    requiredUrls.add(musicOverviewUrl);
-    if (guildId) urls.push(`/api/guilds/${encodeURIComponent(guildId)}/music/state`);
+  if (isProfile) {
+    urls.push("/api/profile");
+    requiredUrls.add("/api/profile");
   } else if (isDashboard || guildId) {
     urls.push("/api/dashboard");
     requiredUrls.add("/api/dashboard");
@@ -484,12 +613,11 @@ async function preloadCriticalData() {
       // Management pages need these payloads before controls become
       // interactive. They are independent and intentionally load together.
       const manageUrl = `/api/guilds/${encodedGuild}/manage`;
-      urls.push(
-        manageUrl,
-        `/api/guilds/${encodedGuild}/tickets/config`,
-        `/api/guilds/${encodedGuild}/music/state`,
-        `/api/guilds/${encodedGuild}/games`,
-      );
+      // The management payload contains everything needed to render the
+      // first Commands tab. Ticket and Games panels fetch their own
+      // data when opened, keeping the initial navigation fast and avoiding
+      // requests for panels the user may never visit.
+      urls.push(manageUrl);
       requiredUrls.add(manageUrl);
     }
   }
@@ -617,7 +745,14 @@ function renderMembersPanel(query = "") {
   search.className = "channel-select members-search";
   search.placeholder = "Search members by name or ID";
   search.value = query;
-  search.addEventListener("input", () => renderMembersPanel(search.value));
+   search.addEventListener("input", () => {
+     window.clearTimeout(membersSearchTimer);
+     const nextQuery = search.value;
+     membersSearchTimer = window.setTimeout(() => {
+       membersSearchTimer = null;
+       renderMembersPanel(nextQuery);
+     }, 120);
+   });
   const count = textElement("span", "members-count", visible.length + " of " + membersPanelRecords.length + " members");
   toolbar.append(search, count);
 
@@ -636,7 +771,8 @@ function renderMembersPanel(query = "") {
   const list = document.createElement("div");
   list.className = "members-list";
   if (!visible.length) list.append(textElement("p", "empty-state", normalized ? "No matching members." : "No members were returned."));
-  visible.forEach((member) => {
+   const rows = document.createDocumentFragment();
+   visible.forEach((member) => {
     const row = document.createElement("article");
     row.className = "member-row";
     const identity = document.createElement("div");
@@ -647,6 +783,7 @@ function renderMembersPanel(query = "") {
       avatar.src = member.avatar_url;
       avatar.alt = "";
       avatar.loading = "lazy";
+      avatar.decoding = "async";
       avatar.addEventListener("error", () => avatar.remove(), { once: true });
       identity.append(avatar);
     } else {
@@ -674,9 +811,10 @@ function renderMembersPanel(query = "") {
       actions.append(button);
     });
     row.append(identity, actions);
-    list.append(row);
-  });
-  membersModalContent.append(toolbar, list);
+     rows.append(row);
+   });
+   list.append(rows);
+   membersModalContent.append(toolbar, list);
 }
 
 async function runMembersAction(action, member = null, bulk = false) {
@@ -801,6 +939,7 @@ function renderDashboard(data) {
   backButton.textContent = "Back";
   landingView.hidden = true;
   portalChoiceView.hidden = true;
+  if (profileView) profileView.hidden = true;
   dashboardView.hidden = false;
   managementView.hidden = true;
   welcomeMessage.textContent = `Welcome, ${data.user.name}`;
@@ -820,13 +959,14 @@ function renderManagedServer(guild) {
     icon.className = "managed-server-icon server-icon";
     icon.src = guild.icon_url;
     icon.alt = "";
+    icon.decoding = "async";
     icon.addEventListener("error", () => icon.replaceWith(fallback));
     managedServerCard.append(icon);
   } else {
     managedServerCard.append(fallback);
   }
   const text = document.createElement("div");
-  text.append(textElement("strong", "", guild.name), textElement("span", "", musicPortalMode ? "BirdBot online" : "BirdBot active"));
+  text.append(textElement("strong", "", guild.name), textElement("span", "", "BirdBot active"));
   managedServerCard.append(text);
 }
 
@@ -847,6 +987,9 @@ function renderControlPanel() {
   const automodFeatureCount = ["anti_link", "anti_spam", "banned_words", "raid_protection", "auto_warning", "auto_timeout"]
     .filter((key) => Boolean(managementData?.automod?.[key])).length;
   const aiEnabled = Boolean(managementData?.ai?.enabled);
+  const levelEnabled = Boolean(managementData?.level?.enabled);
+  const levelStyle = String(managementData?.level?.style || "classic");
+  const streakEnabled = Boolean(managementData?.streak?.enabled);
   const cards = [
     ["Server message", "Configure automated server announcements."],
     ["Roles", `${roles.toLocaleString()} roles available to manage.`],
@@ -854,15 +997,17 @@ function renderControlPanel() {
     ["Temp VC", tempVCEnabled ? "Temporary voice rooms are enabled." : "Enable and manage temporary voice rooms."],
     ["DM's Messages", "Configure private messages sent by BirdBot."],
     ["Bot Settings", `${automodEnabled ? `${automodFeatureCount} Automod rule${automodFeatureCount === 1 ? "" : "s"} enabled` : "Automod disabled"} · ${autoReactRules.toLocaleString()} auto-react rule${autoReactRules === 1 ? "" : "s"} · AI ${aiEnabled ? "enabled" : "disabled"}.`],
+    ["Level", levelEnabled ? `Leveling enabled (${levelStyle} progression).` : "Reward active members with a customizable leveling system."],
     ["Bot profile", "Customize BirdBot's profile and presence."],
     ["VC", vcPremium ? "Premium feature · place secure, host-configured bots in voice channels." : "Premium feature · unlock voice presence controls."],
+    ["Streak", streakEnabled ? "Number streak is active in its configured channel." : "Build an alternating 1, 2, 3… number streak."],
   ];
 
   cards.forEach(([title, description], index) => {
     const card = document.createElement("article");
     card.className = "control-panel-card";
-    if (index === 7) card.classList.add("control-panel-card-premium");
-    const isReady = [0, 1, 3, 4, 5, 6, 7].includes(index);
+    if (index === 8) card.classList.add("control-panel-card-premium");
+    const isReady = [0, 1, 3, 4, 5, 6, 7, 8, 9].includes(index);
     if (isReady) {
       card.classList.add("control-panel-card-action");
       card.tabIndex = 0;
@@ -874,7 +1019,9 @@ function renderControlPanel() {
         if (index === 3) return renderTempVCPanel();
         if (index === 4) return renderDMMessagePanel();
         if (index === 5) return renderBotSettingsPanel();
-        if (index === 6) return renderBotProfilePanel();
+        if (index === 6) return renderLevelPanel();
+        if (index === 7) return renderBotProfilePanel();
+        if (index === 9) return renderStreakPanel();
         return vcPremium ? renderVCPresencePanel() : renderVCPremiumPanel();
       };
       card.addEventListener("click", open);
@@ -885,12 +1032,18 @@ function renderControlPanel() {
         }
       });
     }
-    if (index === 7) card.append(textElement("span", "control-panel-card-premium-badge", "Premium feature"));
+    if (index === 8) card.append(textElement("span", "control-panel-card-premium-badge", "Premium feature"));
     card.append(
       textElement("h3", "control-panel-card-title", title),
       textElement("p", "control-panel-card-copy", description),
-      textElement("span", "control-panel-card-status", index === 0 ? "Open composer" : index === 1 ? "Manage roles" : index === 3 ? "Configure rooms" : index === 4 ? "Open composer" : index === 5 ? "Configure rules" : index === 6 ? "Edit profile" : vcPremium ? "Premium · Manage voice bots" : "Premium required"),
+      textElement("span", "control-panel-card-status", index === 0 ? "Open composer" : index === 1 ? "Manage roles" : index === 3 ? "Configure rooms" : index === 4 ? "Open composer" : index === 5 ? "Configure rules" : index === 6 ? "View leaderboards" : index === 7 ? "Edit profile" : index === 9 ? "Configure game" : vcPremium ? "Premium · Manage voice bots" : "Premium required"),
     );
+    const statusLabel = card.querySelector(".control-panel-card-status");
+    if (statusLabel) {
+      if (index === 6) statusLabel.textContent = "View leaderboards";
+      else if (index === 7) statusLabel.textContent = "Edit profile";
+      else if (index === 9) statusLabel.textContent = "Configure game";
+    }
     grid.append(card);
   });
   commandGrid.append(grid);
@@ -1628,6 +1781,8 @@ function renderBotProfilePanel() {
       const image = document.createElement("img");
       image.src = src;
       image.alt = "Current server avatar";
+      image.loading = "lazy";
+      image.decoding = "async";
       image.addEventListener("error", () => setAvatarPreview(""));
       avatarPreview.append(image);
     } else {
@@ -2702,23 +2857,308 @@ function renderRolesPanel(editingRoleId = "") {
   commandGrid.append(panel);
 }
 
+function renderLevelPanel() {
+  commandGrid.replaceChildren();
+  commandFeedback.hidden = true;
+  const panel = document.createElement("section");
+  panel.className = "level-panel";
+  const heading = document.createElement("div");
+  heading.className = "level-heading";
+  heading.append(
+    textElement("h3", "level-title", "Leveling & activity"),
+    textElement("p", "level-copy", "Reward members for participating, then celebrate milestones with a clear level-up announcement."),
+  );
+  const config = managementData?.level || {};
+  const form = document.createElement("form");
+  form.className = "level-config-form";
+  form.noValidate = true;
+  const enabledLabel = document.createElement("label");
+  enabledLabel.className = "level-enable-field";
+  const enabled = document.createElement("input");
+  enabled.type = "checkbox";
+  enabled.checked = Boolean(config.enabled);
+  enabledLabel.append(enabled, textElement("span", "", "Enable leveling"));
+
+  const styles = [
+    ["classic", "Classic XP", "Steady progression with a configurable XP reward per message."],
+    ["milestone", "Message milestones", "Simple and predictable: one level every 10 messages."],
+    ["activity", "Activity ladder", "Longer-term goals: one level every 25 messages."],
+    ["streak", "Daily momentum", "Reward consistent participation with daily and weekly activity."],
+  ];
+  const selectedConfigStyle = styles.some(([value]) => value === String(config.style || ""))
+    ? String(config.style)
+    : "classic";
+  const styleGrid = document.createElement("div");
+  styleGrid.className = "level-style-grid";
+  const styleInputs = {};
+  styles.forEach(([value, label, description]) => {
+    const option = document.createElement("label");
+    option.className = "level-style-option";
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "level-style";
+    input.value = value;
+    input.checked = selectedConfigStyle === value;
+    styleInputs[value] = input;
+    option.append(input, textElement("span", "level-style-copy", label), textElement("small", "level-style-description", description));
+    styleGrid.append(option);
+  });
+  const channel = createChannelSelect();
+  channel.value = String(config.channel_id || "");
+  const channelField = labeledControl("Level-up announcement channel", channel);
+  const language = document.createElement("select");
+  language.className = "channel-select";
+  language.append(new Option("English", "en"), new Option("Arabic", "ar"));
+  language.value = String(config.language || "en");
+  const languageField = labeledControl("Announcement language", language);
+  const xp = document.createElement("input");
+  xp.className = "channel-select";
+  xp.type = "number";
+  xp.min = "1";
+  xp.max = "100";
+  xp.step = "1";
+  xp.value = String(config.xp_per_message || 10);
+  const xpField = labeledControl("XP per message (Classic XP)", xp);
+  const save = textElement("button", "primary-button", "Save Level settings");
+  save.type = "submit";
+  const status = textElement("span", "level-form-status", "");
+  const hint = textElement("p", "level-form-hint", "Level-up messages mention the member directly and are sent only to the channel you choose.");
+  form.append(
+    enabledLabel,
+    labeledControl("Choose a progression style", styleGrid),
+    channelField,
+    languageField,
+    xpField,
+    hint,
+    document.createElement("div"),
+  );
+  const actions = form.lastElementChild;
+  actions.className = "level-form-actions";
+  actions.append(save, status);
+  const syncEnabled = () => {
+    const active = enabled.checked;
+    channel.disabled = !active;
+    language.disabled = !active;
+    Object.values(styleInputs).forEach((input) => { input.disabled = !active; });
+    const classicSelected = Boolean(styleInputs.classic?.checked);
+    xp.disabled = !active || !classicSelected;
+    xpField.hidden = !classicSelected;
+  };
+  enabled.addEventListener("change", syncEnabled);
+  Object.values(styleInputs).forEach((input) => input.addEventListener("change", syncEnabled));
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (save.disabled) return;
+    if (enabled.checked && !channel.value) {
+      status.textContent = "Choose a channel for level-up announcements.";
+      status.className = "level-form-status is-error";
+      channel.focus();
+      return;
+    }
+    const selectedStyle = Object.entries(styleInputs).find(([, input]) => input.checked)?.[0] || "classic";
+    save.disabled = true;
+    status.textContent = "Saving...";
+    status.className = "level-form-status is-loading";
+    try {
+      const result = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/control/level`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: enabled.checked, style: selectedStyle, channel_id: channel.value || null, language: language.value, xp_per_message: xp.value }),
+      });
+      managementData.level = result.level || managementData.level;
+      managementData.level_stats = result.level_stats || managementData.level_stats;
+      status.textContent = "Saved and applied.";
+      status.className = "level-form-status is-success";
+      commandFeedback.hidden = false;
+      commandFeedback.textContent = "Leveling settings saved and applied to this server.";
+      renderLevelStats(stats, managementData.level_stats || {});
+      syncEnabled();
+    } catch (error) {
+      status.textContent = errorMessage(error, "Level settings could not be saved.");
+      status.className = "level-form-status is-error";
+    } finally {
+      save.disabled = false;
+    }
+  });
+  const stats = document.createElement("section");
+  stats.className = "level-stats";
+  const renderRows = (rows, valueLabel) => {
+    const list = document.createElement("div");
+    list.className = "level-stat-list";
+    if (!Array.isArray(rows) || !rows.length) {
+      list.append(textElement("p", "empty-state", "No activity recorded yet."));
+      return list;
+    }
+    rows.slice(0, 10).forEach((row, index) => {
+      const item = document.createElement("article");
+      item.className = "level-stat-row";
+      const rank = textElement("span", "level-stat-rank", `#${index + 1}`);
+      const avatar = document.createElement("img");
+      avatar.className = "level-stat-avatar";
+      avatar.src = String(row.avatar_url || "");
+      avatar.alt = "";
+      avatar.loading = "lazy";
+      avatar.decoding = "async";
+      avatar.addEventListener("error", () => { avatar.hidden = true; }, { once: true });
+      const copy = document.createElement("div");
+      copy.className = "level-stat-copy";
+      const metric = valueLabel === "XP" ? row.xp : row.messages;
+      copy.append(textElement("strong", "", String(row.display_name || row.username || row.member_id || "Member")), textElement("small", "", `${valueLabel}: ${Number(metric || 0).toLocaleString()} Â· Level ${Number(row.level || 1).toLocaleString()}`));
+      item.append(rank, avatar, copy);
+      list.append(item);
+    });
+    return list;
+  };
+  function renderLevelStats(root, source) {
+    root.replaceChildren();
+    const statDefinitions = [
+      ["Top levels", "leaderboard", "XP"],
+      ["Most active today", "daily", "messages"],
+      ["Most active this week", "weekly", "messages"],
+    ];
+    statDefinitions.forEach(([title, key, valueLabel]) => {
+      const card = document.createElement("section");
+      card.className = "level-stat-card";
+      card.append(textElement("h4", "", title), renderRows(source?.[key], valueLabel));
+      root.append(card);
+    });
+  }
+  renderLevelStats(stats, managementData.level_stats || {});
+  const back = textElement("button", "secondary-button", "Back to Control Panel");
+  back.type = "button";
+  back.addEventListener("click", () => renderControlPanel());
+  panel.append(heading, form, stats, back);
+  commandGrid.append(panel);
+  syncEnabled();
+  // Refresh the card when opened so leaderboards remain useful after a long
+  // dashboard session without reloading the complete management payload.
+  void requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/control/level`, { cache: "no-store" }).then((fresh) => {
+    if (!fresh) return;
+    managementData.level = fresh.level || managementData.level;
+    managementData.level_stats = fresh.level_stats || managementData.level_stats;
+    renderLevelStats(stats, managementData.level_stats || {});
+  }).catch(() => {});
+}
+
+function renderStreakPanel() {
+  stopTempVCRefresh();
+  commandGrid.replaceChildren();
+  commandFeedback.hidden = true;
+  const panel = document.createElement("section");
+  panel.className = "streak-panel";
+  panel.setAttribute("aria-labelledby", "streak-title");
+  const config = managementData?.streak || {};
+  const heading = document.createElement("div");
+  heading.className = "streak-heading";
+  const status = textElement("span", `streak-status ${config.enabled ? "is-enabled" : ""}`, config.enabled ? "Enabled" : "Disabled");
+  heading.append(
+    textElement("h3", "streak-title", "Streak"),
+    textElement("p", "streak-copy", "Build an endless number sequence together. Players take turns sending 1, 2, 3… and every correct number earns a check mark."),
+    status,
+  );
+
+  const form = document.createElement("form");
+  form.className = "streak-config-form";
+  form.noValidate = true;
+  const enabledField = document.createElement("label");
+  enabledField.className = "streak-enable-field";
+  const enabled = document.createElement("input");
+  enabled.type = "checkbox";
+  enabled.checked = Boolean(config.enabled);
+  enabledField.append(enabled, textElement("span", "", "Enable Streak game"));
+  const channel = createChannelSelect();
+  channel.value = String(config.channel_id || "");
+  const channelField = labeledControl("Streak channel", channel);
+  const language = document.createElement("select");
+  language.className = "channel-select";
+  language.append(new Option("English", "en"), new Option("Arabic", "ar"));
+  language.value = String(config.language || "en");
+  const languageField = labeledControl("Streak message language", language);
+  const hint = textElement("p", "streak-form-hint", "Choose English or Arabic for streak messages. Only whole positive numbers are accepted; players must alternate turns, and a wrong number or repeated turn resets the streak to 1." );
+  const save = textElement("button", "primary-button", "Save Streak settings");
+  save.type = "submit";
+  const formStatus = textElement("span", "streak-form-status", "");
+  const actions = document.createElement("div");
+  actions.className = "streak-actions";
+  actions.append(save, formStatus);
+  form.append(enabledField, channelField, languageField, hint, actions);
+
+  const state = document.createElement("section");
+  state.className = "streak-state";
+  const nextNumber = textElement("strong", "streak-next-number", `Next number: ${Math.max(1, Number(config.next_number) || 1)}`);
+  const stateCopy = textElement("p", "streak-state-copy", config.enabled
+    ? "The game is listening in the selected channel."
+    : "Enable the game and save a channel to start the sequence.");
+  state.append(textElement("h4", "", "Live sequence"), nextNumber, stateCopy);
+
+  const sync = () => {
+    const active = enabled.checked;
+    channel.disabled = !active;
+    language.disabled = !active;
+    status.textContent = active ? "Enabled" : "Disabled";
+    status.classList.toggle("is-enabled", active);
+    stateCopy.textContent = active
+      ? "The game is listening in the selected channel."
+      : "Enable the game and save a channel to start the sequence.";
+  };
+  enabled.addEventListener("change", sync);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (save.disabled) return;
+    if (enabled.checked && !channel.value) {
+      formStatus.textContent = "Choose a channel for the Streak game.";
+      formStatus.className = "streak-form-status is-error";
+      channel.focus();
+      return;
+    }
+    save.disabled = true;
+    formStatus.textContent = "Saving...";
+    formStatus.className = "streak-form-status is-loading";
+    try {
+      const result = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/control/streak`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: enabled.checked, channel_id: channel.value || null, language: language.value }),
+      });
+      managementData.streak = result.streak || managementData.streak;
+      const currentNext = Math.max(1, Number(managementData.streak?.next_number) || 1);
+      nextNumber.textContent = `Next number: ${currentNext}`;
+      formStatus.textContent = "Saved and reset to 1.";
+      formStatus.className = "streak-form-status is-success";
+      commandFeedback.hidden = false;
+      commandFeedback.textContent = "Streak settings saved and applied to this server.";
+      sync();
+    } catch (error) {
+      formStatus.textContent = errorMessage(error, "Streak settings could not be saved.");
+      formStatus.className = "streak-form-status is-error";
+    } finally {
+      save.disabled = false;
+    }
+  });
+
+  const back = textElement("button", "secondary-button", "Back to Control Panel");
+  back.type = "button";
+  back.addEventListener("click", () => renderControlPanel());
+  panel.append(heading, form, state, back);
+  commandGrid.append(panel);
+  sync();
+}
+
 function setManagementTab(tab) {
   if (tab !== "control") stopTempVCRefresh();
-  if (tab !== "music" && window.BirdBotMusic?.unmount) window.BirdBotMusic.unmount();
   if (tab !== "games" && window.BirdBotGames?.unmount) window.BirdBotGames.unmount();
   const canConfigure = managementData?.guild?.can_configure !== false;
   document.querySelectorAll("[data-management-tab]").forEach((button) => {
-    button.hidden = musicPortalMode || (["commands", "control", "logs"].includes(button.dataset.managementTab) && !canConfigure);
+    button.hidden = (["commands", "control", "logs"].includes(button.dataset.managementTab) && !canConfigure);
   });
-  if (musicPortalMode) tab = "music";
-  else if (!canConfigure && (["commands", "control", "logs", "music"].includes(tab))) tab = "tickets";
+  if (!canConfigure && (["commands", "control", "logs"].includes(tab))) tab = "tickets";
   activeManagementTab = tab;
   document.querySelectorAll("[data-management-tab]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.managementTab === tab);
   });
   commandFeedback.hidden = true;
-  showTicketsButton.hidden = musicPortalMode || tab !== "tickets";
-  ticketLogsButton.hidden = musicPortalMode || tab !== "tickets";
+  showTicketsButton.hidden = tab !== "tickets";
+  ticketLogsButton.hidden = tab !== "tickets";
   if (tab !== "commands") {
     managementTitle.textContent = tab === "tickets"
       ? "Ticket system"
@@ -2728,21 +3168,17 @@ function setManagementTab(tab) {
         ? "Logs"
       : tab === "ticket_logs"
         ? "Ticket Logs"
-      : tab === "music"
-          ? "Music system"
-          : tab === "games"
+      : tab === "games"
             ? "Games"
           : "Ticket Logs";
     managementDescription.textContent = tab === "tickets"
       ? "Build the panel your members will use to open a ticket."
       : tab === "control"
-        ? "Manage your server messages, roles, channels, voice, DMs, and bot profile."
+        ? "Manage messages, roles, channels, voice, DMs, leveling, streak games, and your bot profile."
       : tab === "logs"
         ? "Choose where BirdBot sends activity logs and enable the events you want to track."
-      : tab === "music"
-        ? "Link Spotify, join your current voice channel, and control BirdBot playback."
-        : tab === "games"
-          ? "Choose a mini-game, review its rules, and browse completed match logs."
+      : tab === "games"
+           ? "Choose a mini-game, review its rules, and browse completed match logs."
         : "This section is ready for the next BirdBot feature.";
     if (tab === "tickets" && window.BirdBotTickets && managementData?.guild?.id) {
       // Support-role staff can work tickets and logs, but only an owner or
@@ -2772,18 +3208,6 @@ function setManagementTab(tab) {
       void loadTicketLogs();
       return;
     }
-    if (tab === "music" && window.BirdBotMusic && managementData?.guild?.id) {
-      window.BirdBotMusic.mount({
-        root: commandGrid,
-        guildId: managementData.guild.id,
-        requestJson,
-        beginLoading,
-        endLoading,
-        initialOverview: musicInitialOverview,
-      });
-      musicInitialOverview = null;
-      return;
-    }
     if (tab === "games" && window.BirdBotGames && managementData?.guild?.id) {
       window.BirdBotGames.mount({
         root: commandGrid,
@@ -2803,7 +3227,7 @@ function setManagementTab(tab) {
     return;
   }
   managementTitle.textContent = "Commands";
-  managementDescription.textContent = "Browse organized command cards for General, Moderation, and Music tools. Open a card to configure shortcuts, language, and run options.";
+  managementDescription.textContent = "Browse organized command cards for General and Moderation tools. Open a card to configure shortcuts, language, and run options.";
   renderCommands();
 }
 
@@ -3418,6 +3842,43 @@ const guildLogCategories = [
   ["moderation", "Moderation actions", "Bans, kicks, warnings, warning removals, timeouts, timeout removals, mutes, un-mutes, unbans, and Automod actions."],
 ];
 
+async function createLogChannel(category, button) {
+  if (!managementData?.guild?.id || button.disabled) return;
+  button.disabled = true;
+  const originalLabel = button.textContent;
+  button.textContent = "Creating...";
+  beginLoading("Creating log channel...");
+  try {
+    const queued = await requestJson(`/api/guilds/${encodeURIComponent(managementData.guild.id)}/control/logs/create-channel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ category }),
+    });
+    const result = await waitForDashboardCommand(queued.request_id, 80);
+    if (result.status !== "complete") throw new Error("Channel creation is still queued. Check Discord shortly.");
+    const created = result.result || {};
+    if (created.channel_id) {
+      const id = String(created.channel_id);
+      const name = String(created.name || `${category}-logs`);
+      const existing = Array.isArray(managementData.channels) ? managementData.channels : [];
+      if (!existing.some((channel) => String(channel.id) === id)) managementData.channels = [...existing, { id, name }].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+      const current = managementData.log_config || {};
+      const destinations = { ...(current.category_channels || {}), [category]: id };
+      managementData.log_config = { ...current, categories: { ...(current.categories || {}), [category]: true }, category_channels: destinations };
+    }
+    commandFeedback.hidden = false;
+    commandFeedback.textContent = `${created.name ? `#${created.name}` : "The log channel"} is ready and assigned to ${category} logs.`;
+    renderGuildLogs(managementData.__guildLogs || [], guildLogsQuery);
+  } catch (error) {
+    commandFeedback.hidden = false;
+    commandFeedback.textContent = errorMessage(error, "The log channel could not be created.");
+  } finally {
+    endLoading();
+    button.disabled = false;
+    button.textContent = originalLabel;
+  }
+}
+
 function guildLogEventName(value) {
   return String(value || "event").replaceAll("_", " ").replace(/^./, (character) => character.toUpperCase());
 }
@@ -3448,7 +3909,7 @@ function renderGuildLogs(logs, query = "") {
   settingsHeading.className = "guild-logs-heading";
   settingsHeading.append(
     textElement("strong", "", "Activity log settings"),
-    textElement("p", "command-settings-hint", "Choose a separate channel for each activity stream and enable only the logs you need."),
+    textElement("p", "command-settings-hint", "Choose a separate channel for each activity stream. Create Channel makes a private administrator-only destination and assigns it automatically."),
   );
   const config = managementData?.log_config || {};
   const categoryValues = config.categories || {};
@@ -3464,10 +3925,11 @@ function renderGuildLogs(logs, query = "") {
   const categoryInputs = {};
   const categoryChannelInputs = {};
   guildLogCategories.forEach(([key, title, description]) => {
-    const label = document.createElement("label");
+    const label = document.createElement("div");
     label.className = "guild-log-category";
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
+    checkbox.setAttribute("aria-label", `Enable ${title}`);
     checkbox.checked = categoryValues[key] !== false;
     categoryInputs[key] = checkbox;
     const copy = document.createElement("span");
@@ -3478,7 +3940,15 @@ function renderGuildLogs(logs, query = "") {
     channel.setAttribute("aria-label", `${title} log channel`);
     channel.value = categoryDestinations[key] || "";
     categoryChannelInputs[key] = channel;
-    label.append(checkbox, copy, channel);
+    const create = textElement("button", "secondary-button guild-log-create-channel", "Create Channel");
+    create.type = "button";
+    create.disabled = managementData?.guild?.can_configure === false;
+    create.title = create.disabled ? "Only server managers can create channels." : `Create a private administrator-only ${title.toLowerCase()} channel`;
+    create.addEventListener("click", (event) => {
+      event.preventDefault();
+      void createLogChannel(key, create);
+    });
+    label.append(checkbox, copy, channel, create);
     categoryGrid.append(label);
   });
   const save = document.createElement("button");
@@ -3547,6 +4017,7 @@ function renderGuildLogs(logs, query = "") {
       avatar.src = log.actor_avatar_url;
       avatar.alt = "";
       avatar.loading = "lazy";
+      avatar.decoding = "async";
       avatar.addEventListener("error", () => avatar.remove(), { once: true });
       actorIdentity.append(avatar);
     }
@@ -3588,7 +4059,8 @@ async function loadGuildLogs(showLoading = true) {
     managementData.log_config = result.log_config || managementData.log_config || {};
     managementTitle.textContent = "Logs";
     managementDescription.textContent = "Choose where BirdBot sends activity logs and enable the events you want to track.";
-    const logs = result.logs || [];
+  const logs = result.logs || [];
+    managementData.__guildLogs = logs;
     const snapshot = JSON.stringify({ logs, config: managementData.log_config });
     if (showLoading || snapshot !== guildLogsSnapshot) {
       guildLogsSnapshot = snapshot;
@@ -3852,7 +4324,7 @@ function renderCommands() {
       config.append(textElement("p", "command-description command-announcement", "Music uses the requesting member's current voice channel. Join the voice channel before running this command."));
     }
     let memberSelect = null;
-    if (["profile", "kick", "ban", "warning", "show_warning", "timeout", "untimeout", "mute", "unmute"].includes(command.name)) {
+    if (["profile", "show_level", "kick", "ban", "warning", "show_warning", "timeout", "untimeout", "mute", "unmute"].includes(command.name)) {
       const memberControl = createMemberSelect();
       memberSelect = memberControl.select;
       let searchTimer = null;
@@ -3860,7 +4332,10 @@ function renderCommands() {
         window.clearTimeout(searchTimer);
         searchTimer = window.setTimeout(() => searchMembers(memberControl.search.value, memberSelect), 180);
       });
-      config.append(labeledControl("Target member", memberControl.element));
+      config.append(labeledControl(command.name === "show_level" ? "Target member (optional)" : "Target member", memberControl.element));
+      if (command.name === "show_level") {
+        config.append(textElement("p", "command-description", "Leave this blank to generate your own level card."));
+      }
       if (command.name === "profile") {
         const profileStats = document.createElement("div");
         profileStats.className = "profile-preview command-description";
@@ -3890,11 +4365,11 @@ function renderCommands() {
             ? "The member will receive a numbered warning and a private notification when possible."
           : command.name === "timeout"
             ? "The member will be timed out for the selected duration."
-            : command.name === "untimeout"
-              ? "The member's active timeout will be removed."
-              : command.name === "mute"
-                ? "The member will be server-muted in their current voice channel."
-                : "The member's server voice mute will be removed.";
+          : command.name === "untimeout"
+            ? "The member's active timeout will be removed."
+          : command.name === "mute"
+            ? "The member will be prevented from sending messages in the selected text channel; their voice state is unchanged."
+            : "The member's chat restriction will be removed from the selected text channel; their voice state is unchanged.";
       config.append(textElement("p", "command-description command-announcement", announcement));
     }
     let warningNumber = null;
@@ -4203,7 +4678,9 @@ async function runWebsiteCommand(commandName, select, button, payload = {}) {
   }
   button.disabled = true;
   button.textContent = "Sending...";
-  const commandLabel = commandName === "show_warning" ? "show warning" : commandName;
+  const commandLabel = commandName === "show_warning" || commandName === "show_level"
+    ? `show ${commandName === "show_level" ? "level" : "warning"}`
+    : commandName;
   beginLoading(`Sending ${commandPrefix}${commandLabel} to BirdBot...`);
   try {
     const requestPayload = { ...payload };
@@ -4263,8 +4740,6 @@ async function runWebsiteCommand(commandName, select, button, payload = {}) {
 }
 
 async function loadManagement(guildId) {
-  musicPortalMode = false;
-  musicInitialOverview = null;
   beginLoading("Loading server management...");
   try {
     managementData = await requestJson(`/api/guilds/${encodeURIComponent(guildId)}/manage`);
@@ -4272,37 +4747,13 @@ async function loadManagement(guildId) {
     renderManagedServer(managementData.guild);
     landingView.hidden = true;
     portalChoiceView.hidden = true;
+    if (profileView) profileView.hidden = true;
     dashboardView.hidden = true;
     managementView.hidden = false;
     backButton.hidden = false;
     backButton.href = "/?dashboard=1";
     backButton.textContent = "Back";
     setManagementTab(managementData.guild.can_configure === false ? "tickets" : "commands");
-  } finally {
-    endLoading();
-  }
-}
-
-async function loadMusicManagement(guildId) {
-  beginLoading("Loading Music system...");
-  try {
-    const overview = await requestJson(`/api/guilds/${encodeURIComponent(guildId)}/music`, { cache: "no-store" });
-    if (!overview || !overview.guild) throw new Error("The Music server could not be resolved.");
-    musicPortalMode = true;
-    managementData = { guild: { ...overview.guild, can_configure: false } };
-    renderAccount(currentUser);
-    renderManagedServer(managementData.guild);
-    landingView.hidden = true;
-    dashboardView.hidden = true;
-    portalChoiceView.hidden = true;
-    managementView.hidden = false;
-    backButton.hidden = false;
-    backButton.href = "/?portal=1";
-    backButton.textContent = "Back";
-    // Pass the already-fetched overview so the player does not perform a
-    // second Spotify request during the same navigation.
-    musicInitialOverview = overview;
-    setManagementTab("music");
   } finally {
     endLoading();
   }
@@ -4380,8 +4831,8 @@ async function loadDashboard() {
 async function initialize() {
   beginLoading("Preparing your BirdBot workspace...");
   try {
-    // Hold the initial interface behind one readiness gate.  The gate loads
-    // independent guild/music/config resources in parallel and populates the
+    // Hold the initial interface behind one readiness gate. The gate loads
+    // independent profile/dashboard resources in parallel and populates the
     // short-lived preload cache consumed by the route renderers below.
     const preload = await preloadCriticalData();
     const session = preload.session;
@@ -4390,21 +4841,14 @@ async function initialize() {
     if (!session.authenticated) return;
     const parameters = new URLSearchParams(window.location.search);
     const guildId = parameters.get("guild");
-    if (parameters.get("music") === "1") {
-      if (guildId) {
-        try {
-          await loadMusicManagement(guildId);
-        } catch (error) {
-          const message = errorMessage(error, "The Music system could not be loaded.");
-          window.history.replaceState({ portal: true }, "", "/?portal=1");
-          renderPortalChoice(message);
-        }
-      } else {
-        try {
-          await loadMusicGuildChoice();
-        } catch (error) {
-          renderPortalChoice(errorMessage(error, "Music servers could not be loaded."));
-        }
+    if (parameters.get("profile") === "1" || parameters.get("music") === "1") {
+      // Old Music portal links are redirected to the replacement Profile
+      // portal instead of opening a removed website feature.
+      if (parameters.get("music") === "1") window.history.replaceState({ profile: true }, "", "/?profile=1");
+      try {
+        await loadProfilePortal();
+      } catch (error) {
+        renderPortalChoice(errorMessage(error, "Your Profile could not be loaded."));
       }
       return;
     }
@@ -4447,7 +4891,7 @@ async function initialize() {
     if (cachedSession?.authenticated) renderAccount(cachedSession.user);
     // A failed protected preload should resolve to a useful portal/error
     // state instead of leaving every view hidden behind a blank page.
-    if (parameters.get("music") === "1" || parameters.get("portal") === "1") {
+    if (parameters.get("profile") === "1" || parameters.get("music") === "1" || parameters.get("portal") === "1") {
       window.history.replaceState({ portal: true }, "", "/?portal=1");
       renderPortalChoice(message);
     } else if (parameters.get("guild") || parameters.get("dashboard") === "1") {

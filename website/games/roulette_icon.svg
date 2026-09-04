@@ -1,8 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="Roulette icon">
-  <defs><radialGradient id="r"><stop stop-color="#eee"/><stop offset=".55" stop-color="#666"/><stop offset="1" stop-color="#111"/></radialGradient></defs>
-  <rect width="256" height="256" rx="48" fill="#090909"/>
-  <circle cx="128" cy="128" r="92" fill="url(#r)" stroke="#f5f5f5" stroke-width="8"/>
-  <circle cx="128" cy="128" r="68" fill="#151515" stroke="#aaa" stroke-width="5"/>
-  <path d="M128 60v136M60 128h136M80 80l96 96M176 80l-96 96" stroke="#ddd" stroke-width="4" opacity=".7"/>
-  <circle cx="128" cy="128" r="25" fill="#eee" stroke="#111" stroke-width="6"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Roulette icon">
+  <defs>
+    <linearGradient id="wheel-bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#18294a"/><stop offset="1" stop-color="#0a1324"/></linearGradient>
+    <linearGradient id="wheel-ring" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#a5b4fc"/><stop offset="1" stop-color="#5eead4"/></linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="#0b1528"/>
+  <circle cx="128" cy="128" r="94" fill="url(#wheel-bg)" stroke="#31466f" stroke-width="5"/>
+  <circle cx="128" cy="128" r="76" fill="#172747" stroke="url(#wheel-ring)" stroke-width="8"/>
+  <path d="M128 52v152M52 128h152M74 74l108 108M182 74L74 182" stroke="#8999c3" stroke-width="3" opacity=".8"/>
+  <path d="M128 58a70 70 0 0 1 61 35l-61 35zM189 163a70 70 0 0 1-61 35v-70zM128 198a70 70 0 0 1-61-35l61-35zM67 93a70 70 0 0 1 61-35v70z" fill="#263b63" opacity=".9"/>
+  <circle cx="128" cy="128" r="27" fill="#0b1528" stroke="#eef2ff" stroke-width="6"/>
+  <circle cx="128" cy="128" r="10" fill="#a5b4fc"/>
+  <path d="M128 25v20" stroke="#5eead4" stroke-width="9" stroke-linecap="round"/>
 </svg>

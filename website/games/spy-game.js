@@ -6,7 +6,7 @@
     name: "Spy Game",
     theme: "#000000",
     bannerPath: "/assets/games/spy_banner.svg",
-    iconPath: "/assets/games/spy_icon.svg",
+    iconPath: "/assets/games/spy_icon.svg?v=3",
     minimumPlayers: 3,
     maximumPlayers: 20,
     questionTimerSeconds: 30,
@@ -20,7 +20,7 @@
     name: "Roulette",
     theme: "#000000",
     bannerPath: "/assets/games/roulette_banner.png",
-    iconPath: "/assets/games/roulette_icon.svg",
+    iconPath: "/assets/games/roulette_icon.svg?v=3",
     minimumPlayers: 2,
     maximumPlayers: 20,
     enabled: true,
@@ -35,7 +35,7 @@
     name: "Guess the Number",
     theme: "#1f2937",
     bannerPath: "/assets/games/spy_banner.svg",
-    iconPath: "/assets/games/spy_icon.svg",
+    iconPath: "/assets/games/guess_number_icon.svg?v=3",
     minimumPlayers: 2,
     maximumPlayers: 20,
     numberMinimum: 1,
@@ -75,6 +75,7 @@
     image.src = src;
     image.alt = alt || "";
     image.loading = "lazy";
+    image.decoding = "async";
     image.addEventListener("error", () => image.remove());
     return image;
   }
@@ -251,24 +252,20 @@
 
   function renderRules(language) {
     const rules = node("div", "spy-rules-grid");
-    if (language === "ar") {
-      const arabic = node("article", "spy-rule-card spy-rule-card-ar");
-      arabic.dir = "rtl";
-      arabic.append(
-        node("span", "spy-rule-language", "العربية"),
-        node("h4", "", "طريقة اللعب"),
-        node("p", "", "يحصل المواطنون على كلمة أو مكان سري. يتم اختيار لاعب واحد سراً ليكون الجاسوس. يطرح المواطنون أسئلة ذكية لاكتشاف الجاسوس، بينما يحاول الجاسوس الاندماج ومعرفة السر دون أن ينكشف."),
-      );
-      rules.append(arabic);
-    } else {
-      const english = node("article", "spy-rule-card");
-      english.append(
-        node("span", "spy-rule-language", "ENGLISH"),
-        node("h4", "", "How it works"),
-        node("p", "", "Citizens receive a secret word or location. One player is secretly the Spy. Citizens ask careful questions to find the Spy, while the Spy blends in and tries to discover the secret without getting caught."),
-      );
-      rules.append(english);
-    }
+    const english = node("article", `spy-rule-card ${language === "en" ? "is-primary" : ""}`);
+    english.append(
+      node("span", "spy-rule-language", "ENGLISH"),
+      node("h4", "", "How it works"),
+      node("p", "", "Citizens receive a secret word or location. One player is secretly the Spy. Citizens ask careful questions to find the Spy, while the Spy blends in and tries to discover the secret without getting caught."),
+    );
+    const arabic = node("article", `spy-rule-card spy-rule-card-ar ${language === "ar" ? "is-primary" : ""}`);
+    arabic.dir = "rtl";
+    arabic.append(
+      node("span", "spy-rule-language", "العربية"),
+      node("h4", "", "طريقة اللعب"),
+      node("p", "", "يحصل المواطنون على كلمة أو مكان سري. يتم اختيار لاعب واحد سراً ليكون الجاسوس. يطرح المواطنون أسئلة ذكية لاكتشاف الجاسوس، بينما يحاول الجاسوس الاندماج ومعرفة السر دون أن ينكشف."),
+    );
+    rules.append(english, arabic);
     return rules;
   }
 

@@ -39,6 +39,7 @@
     element.src = src;
     element.alt = alt || "";
     element.loading = "lazy";
+    element.decoding = "async";
     element.addEventListener("error", () => element.remove());
     return element;
   }
@@ -178,6 +179,25 @@
     return section;
   }
 
+  function renderRules(language) {
+    const rules = node("section", "spy-rules-grid roulette-rules");
+    const english = node("article", `spy-rule-card ${language === "en" ? "is-primary" : ""}`);
+    english.append(
+      node("span", "spy-rule-language", "ENGLISH"),
+      node("h4", "", "How to play"),
+      node("p", "", "Join the lobby, wait for the host to start, then take your turn when the bot prompts you. The wheel selects one player at a time; the match ends when the configured round or winner condition is reached."),
+    );
+    const arabic = node("article", `spy-rule-card spy-rule-card-ar ${language === "ar" ? "is-primary" : ""}`);
+    arabic.dir = "rtl";
+    arabic.append(
+      node("span", "spy-rule-language", "العربية"),
+      node("h4", "", "طريقة اللعب"),
+      node("p", "", "انضم إلى الرَدْهة وانتظر بدء المضيف، ثم خذ دورك عندما يطلب البوت ذلك. تختار العجلة لاعباً في كل مرة، وتنتهي المباراة عند الوصول إلى الجولة أو شرط الفوز المحدد."),
+    );
+    rules.append(english, arabic);
+    return rules;
+  }
+
   function renderDetails(game) {
     if (!root) return;
     root.replaceChildren();
@@ -266,10 +286,11 @@
       }
     });
     const config = renderConfig(game);
+    const rules = renderRules(game.language === "ar" ? "ar" : "en");
     const setup = node("button", "game-setup-button", "Setup");
     setup.type = "button";
     setup.addEventListener("click", () => config.querySelector(".spy-config-save")?.click());
-    wrapper.append(top, hero, launch, config, setup);
+    wrapper.append(top, hero, launch, rules, config, setup);
     root.append(wrapper);
   }
 

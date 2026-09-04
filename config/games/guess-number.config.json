@@ -2,6 +2,8 @@
   "id": "guess-number",
   "name": "Guess the Number",
   "theme": "#1f2937",
+  "bannerPath": "./games/spy_banner.svg",
+  "iconPath": "./games/guess_number_icon.svg",
   "minimumPlayers": 2,
   "maximumPlayers": 20,
   "numberMinimum": 1,

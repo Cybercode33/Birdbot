@@ -17,6 +17,10 @@ DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
 DISCORD_OWNER_ID = os.getenv("DISCORD_OWNER_ID")
 SESSION_SECRET = os.getenv("SESSION_SECRET")
 DATA_PATH = Path(os.getenv("BIRDBOT_DATA_PATH") or (BASE_DIR / "data" / "birdbot.sqlite3"))
+# Member level progress and activity live in their own SQLite file so an
+# administrator can reset users simply by removing this file. Leveling
+# configuration remains in the main database and is preserved by a reset.
+LEVEL_DATA_PATH = Path(os.getenv("BIRDBOT_LEVEL_DATA_PATH") or DATA_PATH.with_name("levels.sqlite3"))
 SUPPORT_URL = os.getenv("SUPPORT_URL")
 
 # Optional Groq provider for the per-server AI assistant.  The key stays in
